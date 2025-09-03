@@ -1,0 +1,99 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Google spiregg; 0
+; Bound: 61
+; Schema: 0
+               OpCapability Shader
+               OpCapability ImageQuery
+               OpExtension "SPV_KHR_non_semantic_info"
+          %1 = OpExtInstImport "NonSemantic.DebugPrintf"
+          %2 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 16 16 1
+          %5 = OpString "HELLO WORLD 12345 HLSL SHADER!!!  Thread = %u 
+"
+               OpSource HLSL 620
+               OpName %type_2d_image "type.2d.image"
+               OpName %image "image"
+               OpName %type_ConstantBuffer_PushConstants "type.ConstantBuffer.PushConstants"
+               OpMemberName %type_ConstantBuffer_PushConstants 0 "data1"
+               OpMemberName %type_ConstantBuffer_PushConstants 1 "data2"
+               OpMemberName %type_ConstantBuffer_PushConstants 2 "data3"
+               OpMemberName %type_ConstantBuffer_PushConstants 3 "data4"
+               OpName %PC "PC"
+               OpName %main "main"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %image DescriptorSet 0
+               OpDecorate %image Binding 0
+               OpMemberDecorate %type_ConstantBuffer_PushConstants 0 Offset 0
+               OpMemberDecorate %type_ConstantBuffer_PushConstants 1 Offset 16
+               OpMemberDecorate %type_ConstantBuffer_PushConstants 2 Offset 32
+               OpMemberDecorate %type_ConstantBuffer_PushConstants 3 Offset 48
+               OpDecorate %type_ConstantBuffer_PushConstants Block
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+       %bool = OpTypeBool
+      %false = OpConstantFalse %bool
+      %int_1 = OpConstant %int 1
+      %float = OpTypeFloat 32
+%type_2d_image = OpTypeImage %float 2D 2 0 0 2 Rgba32f
+%_ptr_UniformConstant_type_2d_image = OpTypePointer UniformConstant %type_2d_image
+    %v4float = OpTypeVector %float 4
+%type_ConstantBuffer_PushConstants = OpTypeStruct %v4float %v4float %v4float %v4float
+%_ptr_PushConstant_type_ConstantBuffer_PushConstants = OpTypePointer PushConstant %type_ConstantBuffer_PushConstants
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+       %void = OpTypeVoid
+         %23 = OpTypeFunction %void
+     %v2uint = OpTypeVector %uint 2
+%_ptr_PushConstant_v4float = OpTypePointer PushConstant %v4float
+      %v2int = OpTypeVector %int 2
+      %image = OpVariable %_ptr_UniformConstant_type_2d_image UniformConstant
+         %PC = OpVariable %_ptr_PushConstant_type_ConstantBuffer_PushConstants PushConstant
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+%_ptr_Input_uint = OpTypePointer Input %uint
+       %main = OpFunction %void None %23
+         %28 = OpLabel
+         %29 = OpLoad %type_2d_image %image
+         %30 = OpImageQuerySize %v2uint %29
+         %31 = OpCompositeExtract %uint %30 0
+         %32 = OpCompositeExtract %uint %30 1
+         %33 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %int_0
+         %34 = OpLoad %uint %33
+         %35 = OpExtInst %void %1 1 %5 %34
+         %36 = OpULessThan %bool %34 %31
+               OpSelectionMerge %37 None
+               OpBranchConditional %36 %38 %37
+         %38 = OpLabel
+         %39 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %int_1
+         %40 = OpLoad %uint %39
+         %41 = OpULessThan %bool %40 %32
+               OpBranch %37
+         %37 = OpLabel
+         %42 = OpPhi %bool %false %28 %41 %38
+               OpSelectionMerge %43 None
+               OpBranchConditional %42 %44 %43
+         %44 = OpLabel
+         %45 = OpAccessChain %_ptr_PushConstant_v4float %PC %int_0
+         %46 = OpLoad %v4float %45
+         %47 = OpAccessChain %_ptr_PushConstant_v4float %PC %int_1
+         %48 = OpLoad %v4float %47
+         %49 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %int_1
+         %50 = OpLoad %uint %49
+         %51 = OpConvertUToF %float %50
+         %52 = OpConvertUToF %float %32
+         %53 = OpFDiv %float %51 %52
+         %54 = OpCompositeConstruct %v4float %53 %53 %53 %53
+         %55 = OpExtInst %v4float %2 FMix %46 %48 %54
+         %56 = OpLoad %v3uint %gl_GlobalInvocationID
+         %57 = OpVectorShuffle %v2uint %56 %56 0 1
+         %58 = OpBitcast %v2int %57
+         %59 = OpBitcast %v2uint %58
+         %60 = OpLoad %type_2d_image %image
+               OpImageWrite %60 %59 %55 None
+               OpBranch %43
+         %43 = OpLabel
+               OpReturn
+               OpFunctionEnd
