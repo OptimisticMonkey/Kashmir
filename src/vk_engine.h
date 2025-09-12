@@ -68,9 +68,23 @@ constexpr unsigned int FRAME_OVERLAP = 2;
 class VulkanEngine {
 public:
 
+	
+
+	AllocatedImage _whiteImage;
+	AllocatedImage _blackImage;
+	AllocatedImage _greyImage;
+	AllocatedImage _errorCheckerboardImage;
+
+	VkSampler _defaultSamplerLinear;
+	VkSampler _defaultSamplerNearest;
+
+	AllocatedImage create_image(VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	AllocatedImage create_image(void* data, VkExtent3D size, VkFormat format, VkImageUsageFlags usage, bool mipmapped = false);
+	void destroy_image(const AllocatedImage& img);
+
 	GPUSceneData sceneData;
 
-	VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
+	
 
 	// immediate submit structures
 	std::vector<VkSemaphore> _presentSemaphores;  // one binary semaphore per swapchain image
@@ -88,7 +102,8 @@ public:
 
 	VkDescriptorSet _drawImageDescriptors;
 	VkDescriptorSetLayout _drawImageDescriptorLayout;
-
+	VkDescriptorSetLayout _gpuSceneDataDescriptorLayout;
+	VkDescriptorSetLayout _singleImageDescriptorLayout;
 
 	VmaAllocator _allocator;
 	//draw resources
