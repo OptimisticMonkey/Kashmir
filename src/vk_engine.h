@@ -92,6 +92,17 @@ struct DeletionQueue
 	}
 };
 
+struct DrawContext {
+	std::vector<RenderObject> OpaqueSurfaces;
+};
+
+struct MeshNode : public Node {
+
+	std::shared_ptr<MeshAsset> mesh;
+
+	virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) override;
+};
+
 struct FrameData {
 
 	VkCommandPool _commandPool;
@@ -109,6 +120,11 @@ constexpr unsigned int FRAME_OVERLAP = 2;
 
 class VulkanEngine {
 public:
+
+	DrawContext mainDrawContext;
+	std::unordered_map<std::string, std::shared_ptr<Node>> loadedNodes;
+
+	void update_scene();
 
 	MaterialInstance defaultData;
 	GLTFMetallic_Roughness metalRoughMaterial;

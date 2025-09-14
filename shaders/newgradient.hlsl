@@ -37,7 +37,7 @@ void main(uint3 DTid : SV_DispatchThreadID, // GLSL gl_GlobalInvocationID
     imageTex.GetDimensions(w, h);
 
     uint2 texelCoord = DTid.xy;
-    printf("HELLO HLSL SHADER!!!  Thread = %d \n", GTid.x);
+    //printf("HELLO HLSL SHADER!!!  Thread = %d \n", GTid.x);
     if (texelCoord.x < w && texelCoord.y < h)
     {
         float4 color = float4(0.0, 0.0, 0.0, 1.0);
