@@ -110,7 +110,8 @@ constexpr unsigned int FRAME_OVERLAP = 2;
 class VulkanEngine {
 public:
 
-	
+	MaterialInstance defaultData;
+	GLTFMetallic_Roughness metalRoughMaterial;
 
 	AllocatedImage _whiteImage;
 	AllocatedImage _blackImage;
@@ -140,7 +141,8 @@ public:
 	VkPipeline _gradientPipeline;
 	VkPipelineLayout _gradientPipelineLayout;
 
-	DescriptorAllocator globalDescriptorAllocator;
+	//DescriptorAllocator globalDescriptorAllocator;
+	DescriptorAllocatorGrowable globalDescriptorAllocator;
 
 	VkDescriptorSet _drawImageDescriptors;
 	VkDescriptorSetLayout _drawImageDescriptorLayout;
