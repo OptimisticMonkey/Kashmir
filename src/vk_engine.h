@@ -4,6 +4,7 @@
 #pragma once
 
 #include <vk_types.h>
+#include <camera.h>
 #include <vk_loader.h>
 #include <vk_descriptors.h>
 
@@ -121,6 +122,8 @@ constexpr unsigned int FRAME_OVERLAP = 2;
 class VulkanEngine {
 public:
 
+	Camera mainCamera;
+
 	DrawContext mainDrawContext;
 	std::unordered_map<std::string, std::shared_ptr<Node>> loadedNodes;
 
@@ -219,6 +222,10 @@ public:
 	int currentBackgroundEffect{ 0 };
 	GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
 
+	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+	void destroy_buffer(const AllocatedBuffer& buffer);
+
+
 private:
 
 	void init_vulkan();
@@ -239,8 +246,6 @@ private:
 
 	void init_triangle_pipeline();
 
-	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
-	void destroy_buffer(const AllocatedBuffer& buffer);
 
 	VkPipelineLayout _meshPipelineLayout;
 	VkPipeline _meshPipeline;
@@ -251,4 +256,6 @@ private:
 	void init_default_data();
 
 	std::vector<std::shared_ptr<MeshAsset>> testMeshes;
+
+	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 };
