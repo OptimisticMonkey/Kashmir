@@ -58,6 +58,7 @@ if (data) {
 [&](fastgltf::sources::BufferView& view) {
     auto& bufferView = asset.bufferViews[view.bufferViewIndex];
     auto& buffer = asset.buffers[bufferView.bufferIndex];
+    std::size_t i = buffer.data.index();
 
     std::visit(fastgltf::visitor { // We only care about VectorWithMime here, because we
         // specify LoadExternalBuffers, meaning all buffers
