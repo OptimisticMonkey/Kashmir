@@ -1605,7 +1605,7 @@ void VulkanEngine::update_scene()
     //  Keep a vector of Actors that have transform, and a pointer to loaded node
 
     glm::mat4 T;
-    loadedNodes["Suzanne"]->Draw(T, mainDrawContext,30);
+    loadedNodes["Suzanne"]->Draw(T, mainDrawContext,10);
 
     //for (size_t i = 0; i < 10; i++)
     //{
