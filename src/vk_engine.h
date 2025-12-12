@@ -43,10 +43,13 @@ struct RenderObject {
 	uint32_t firstIndex;
 	VkBuffer indexBuffer;
 
+	uint32_t instanceCount;
+
 	MaterialInstance* material;
 
 	glm::mat4 transform;
 	VkDeviceAddress vertexBufferAddress;
+	VkDeviceAddress instanceTransformBufferAddress;
 };
 
 
@@ -101,7 +104,7 @@ struct MeshNode : public Node {
 
 	std::shared_ptr<MeshAsset> mesh;
 
-	virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) override;
+	virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCount) override;
 };
 
 struct FrameData {

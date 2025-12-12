@@ -84,35 +84,36 @@ void VulkanEngine::init()
 
 void VulkanEngine::init_default_data() 
 {
-    std::array<Vertex, 4> rect_vertices;
+    //std::array<Vertex, 4> rect_vertices;
 
-    rect_vertices[0].position = { 0.5,-0.5, 0 };
-    rect_vertices[1].position = { 0.5,0.5, 0 };
-    rect_vertices[2].position = { -0.5,-0.5, 0 };
-    rect_vertices[3].position = { -0.5,0.5, 0 };
+    //rect_vertices[0].position = { 0.5,-0.5, 0 };
+    //rect_vertices[1].position = { 0.5,0.5, 0 };
+    //rect_vertices[2].position = { -0.5,-0.5, 0 };
+    //rect_vertices[3].position = { -0.5,0.5, 0 };
 
-    rect_vertices[0].color = { 0,0, 0,1 };
-    rect_vertices[1].color = { 0.5,0.5,0.5 ,1 };
-    rect_vertices[2].color = { 1,0, 0,1 };
-    rect_vertices[3].color = { 0,1, 0,1 };
+    //rect_vertices[0].color = { 0,0, 0,1 };
+    //rect_vertices[1].color = { 0.5,0.5,0.5 ,1 };
+    //rect_vertices[2].color = { 1,0, 0,1 };
+    //rect_vertices[3].color = { 0,1, 0,1 };
 
-    std::array<uint32_t, 6> rect_indices;
+    //std::array<uint32_t, 6> rect_indices;
 
-    rect_indices[0] = 0;
-    rect_indices[1] = 1;
-    rect_indices[2] = 2;
+    //rect_indices[0] = 0;
+    //rect_indices[1] = 1;
+    //rect_indices[2] = 2;
 
-    rect_indices[3] = 2;
-    rect_indices[4] = 1;
-    rect_indices[5] = 3;
+    //rect_indices[3] = 2;
+    //rect_indices[4] = 1;
+    //rect_indices[5] = 3;
 
-    rectangle = uploadMesh(rect_indices, rect_vertices);
+    //rectangle = uploadMesh(rect_indices, rect_vertices);
 
-    //delete the rectangle data on engine shutdown
-    _mainDeletionQueue.push_function([&]() {
-        destroy_buffer(rectangle.indexBuffer);
-        destroy_buffer(rectangle.vertexBuffer);
-        });
+    ////delete the rectangle data on engine shutdown
+    //_mainDeletionQueue.push_function([&]() {
+    //    destroy_buffer(rectangle.indexBuffer);
+    //    destroy_buffer(rectangle.vertexBuffer); 
+    //    destroy_buffer(rectangle.instanceTransformBuffer);
+    //    });
 
 
     testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
@@ -869,6 +870,7 @@ void VulkanEngine::cleanup()
         for (auto& mesh : testMeshes) {
             destroy_buffer(mesh->meshBuffers.indexBuffer);
             destroy_buffer(mesh->meshBuffers.vertexBuffer);
+            destroy_buffer(mesh->meshBuffers.instanceTransformBuffer);
         }
 
 		//get_current_frame()._deletionQueue.flush();
@@ -1181,6 +1183,10 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     //vkCmdBindIndexBuffer(cmd, testMeshes[2]->meshBuffers.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
     //vkCmdDrawIndexed(cmd, testMeshes[2]->surfaces[0].count, 1, testMeshes[2]->surfaces[0].startIndex, 0, 0);
 
+
+    //Loop over actors
+
+
     for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces) {
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->pipeline);
@@ -1191,10 +1197,13 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
         GPUDrawPushConstants pushConstants;
         pushConstants.vertexBuffer = draw.vertexBufferAddress;
+        pushConstants.instanceTransformBuffer = draw.instanceTransformBufferAddress;
         pushConstants.worldMatrix = draw.transform;
         vkCmdPushConstants(cmd, draw.material->pipeline->layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &pushConstants);
 
-        vkCmdDrawIndexed(cmd, draw.indexCount, 1, draw.firstIndex, 0, 0);
+        vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+
+        //vkCmdDrawIndexed(cmd, draw.indexCount, 100, draw.firstIndex, 0, 0);
     }
 
 
@@ -1204,8 +1213,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
 void VulkanEngine::draw_background(VkCommandBuffer cmd)
 {
-   
-
     //--------------------------------------------------
     ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
     //ComputeEffect& effect = backgroundEffects[1];
@@ -1227,8 +1234,6 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
     {
         vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
     }
-    
-
 }
 
 void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
@@ -1333,33 +1338,54 @@ void VulkanEngine::destroy_buffer(const AllocatedBuffer& buffer)
     vmaDestroyBuffer(_allocator, buffer.buffer, buffer.allocation);
 }
 
+const int MAX_INSTANCE_COUNT = 1000;
 GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices)
 {
     const size_t vertexBufferSize = vertices.size() * sizeof(Vertex);
     const size_t indexBufferSize = indices.size() * sizeof(uint32_t);
+    const size_t instanceTransformBufferSize = MAX_INSTANCE_COUNT * sizeof(InstanceTransform);
 
     GPUMeshBuffers newSurface;
 
     //create vertex buffer
     newSurface.vertexBuffer = create_buffer(vertexBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
-
     //find the adress of the vertex buffer
     VkBufferDeviceAddressInfo deviceAdressInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,.buffer = newSurface.vertexBuffer.buffer };
     newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInfo);
+
+
+    //create InstanceTransformBuffer
+    newSurface.instanceTransformBuffer = create_buffer(instanceTransformBufferSize, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+    //find the adress of the InstanceTransformBuffer
+    VkBufferDeviceAddressInfo deviceAdressInstanceTransformInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,.buffer = newSurface.instanceTransformBuffer.buffer };
+    newSurface.instanceTransformBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInstanceTransformInfo);
+
 
     //create index buffer
     newSurface.indexBuffer = create_buffer(indexBufferSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
 
-    AllocatedBuffer staging = create_buffer(vertexBufferSize + indexBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
 
+    std::vector<InstanceTransform> transforms;
+    for(int i = 0; i < MAX_INSTANCE_COUNT; i++)
+    {
+        InstanceTransform t;
+		glm::mat4 mat = glm::translate(glm::vec3(i*3, i*3, 0));
+        t.transform = mat;
+        transforms.push_back(t);
+	}
+
+    AllocatedBuffer staging = create_buffer(vertexBufferSize + indexBufferSize + instanceTransformBufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
     void* data = staging.allocation->GetMappedData();
 
     // copy vertex buffer
     memcpy(data, vertices.data(), vertexBufferSize);
     // copy index buffer
     memcpy((char*)data + vertexBufferSize, indices.data(), indexBufferSize);
+    // copy instance transfroms
+    memcpy((char*)data + vertexBufferSize + indexBufferSize, transforms.data(), instanceTransformBufferSize);
 
     immediate_submit([&](VkCommandBuffer cmd) {
         VkBufferCopy vertexCopy{ 0 };
@@ -1375,6 +1401,14 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
         indexCopy.size = indexBufferSize;
 
         vkCmdCopyBuffer(cmd, staging.buffer, newSurface.indexBuffer.buffer, 1, &indexCopy);
+
+        VkBufferCopy transformCopy{ 0 };
+        transformCopy.dstOffset = 0;
+        transformCopy.srcOffset = vertexBufferSize + indexBufferSize;
+        transformCopy.size = instanceTransformBufferSize;
+
+        vkCmdCopyBuffer(cmd, staging.buffer, newSurface.instanceTransformBuffer.buffer, 1, &transformCopy);
+
         });
 
     destroy_buffer(staging);
@@ -1568,7 +1602,26 @@ void VulkanEngine::update_scene()
     sceneData.sunlightDirection = glm::vec4(0, 1, 0.5, 1.f);
 
 
-    loadedNodes["Suzanne"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
+    //  Keep a vector of Actors that have transform, and a pointer to loaded node
+
+    glm::mat4 T;
+    loadedNodes["Suzanne"]->Draw(T, mainDrawContext,30);
+
+    //for (size_t i = 0; i < 10; i++)
+    //{
+    //    for (size_t j = 0; j < 10; j++)
+    //    {
+    //        glm::mat4 T = glm::translate(glm::mat4(1.0f), glm::vec3(i * 2, j * 2.0, 0.0f));
+    //        loadedNodes["Suzanne"]->Draw(T, mainDrawContext);
+    //    }
+    //}
+
+    //loadedNodes["Suzanne"]->Draw(glm::mat4{ 1.f }, mainDrawContext);
+
+
+    //glm::mat4 T2 = glm::translate(glm::mat4(1.0f), glm::vec3(-4.0f, 0.0f, 0.0f));
+    //loadedNodes["Suzanne"]->Draw(T2, mainDrawContext);
+
 
     //for (int x = -3; x < 3; x++) {
 
@@ -1684,7 +1737,7 @@ MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device, Materia
     return matData;
 }
 
-void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
+void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCount)
 {
     glm::mat4 nodeMatrix = topMatrix * worldTransform;
 
@@ -1694,15 +1747,17 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx)
         def.firstIndex = s.startIndex;
         def.indexBuffer = mesh->meshBuffers.indexBuffer.buffer;
         def.material = &s.material->data;
+        def.instanceCount = InstanceCount;
 
         def.transform = nodeMatrix;
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
+        def.instanceTransformBufferAddress = mesh->meshBuffers.instanceTransformBufferAddress;
 
         ctx.OpaqueSurfaces.push_back(def);
     }
 
     // recurse down
-    Node::Draw(topMatrix, ctx);
+    Node::Draw(topMatrix, ctx, InstanceCount);
 }
 
 void GLTFMetallic_Roughness::clear_resources(VkDevice device)

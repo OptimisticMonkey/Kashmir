@@ -36,7 +36,7 @@ struct DrawContext;
 // base class for a renderable dynamic object
 class IRenderable {
 
-    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx) = 0;
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCount) = 0;
 };
 
 // implementation of a drawable scene node.
@@ -59,11 +59,11 @@ struct Node : public IRenderable {
         }
     }
 
-    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx)
+    virtual void Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCount)
     {
         // draw children
         for (auto& c : children) {
-            c->Draw(topMatrix, ctx);
+            c->Draw(topMatrix, ctx, InstanceCount);
         }
     }
 };
@@ -91,18 +91,27 @@ struct Vertex {
     glm::vec4 color;
 };
 
+struct InstanceTransform {
+	glm::mat4 transform;
+};
+
+
 // holds the resources needed for a mesh
 struct GPUMeshBuffers {
 
     AllocatedBuffer indexBuffer;
     AllocatedBuffer vertexBuffer;
     VkDeviceAddress vertexBufferAddress;
+    AllocatedBuffer instanceTransformBuffer;
+    VkDeviceAddress instanceTransformBufferAddress;
+
 };
 
 // push constants for our mesh object draws
 struct GPUDrawPushConstants {
     glm::mat4 worldMatrix;
     VkDeviceAddress vertexBuffer;
+    VkDeviceAddress instanceTransformBuffer;
 };
 
 enum class MaterialPass :uint8_t {

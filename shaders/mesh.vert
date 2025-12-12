@@ -22,20 +22,30 @@ layout(buffer_reference, std430) readonly buffer VertexBuffer{
 	Vertex vertices[];
 };
 
+struct InstanceTransform {
+	mat4 transform;
+}; 
+
+layout(buffer_reference, std430) readonly buffer InstanceTransformBuffer{ 
+	InstanceTransform transforms[];
+};
+
 //push constants block
 layout( push_constant ) uniform constants
 {
 	mat4 render_matrix;
 	VertexBuffer vertexBuffer;
+	InstanceTransformBuffer instanceTransformBuffer;
+
 } PushConstants;
 
 void main() 
 {
 	Vertex v = PushConstants.vertexBuffer.vertices[gl_VertexIndex];
-	
 	vec4 position = vec4(v.position, 1.0f);
-
-	gl_Position =  sceneData.viewproj * PushConstants.render_matrix *position;
+	//gl_Position =  sceneData.viewproj * PushConstants.render_matrix *position;
+	mat4 instance_transform = PushConstants.instanceTransformBuffer.transforms[gl_InstanceIndex].transform;
+	gl_Position =  sceneData.viewproj * instance_transform * position;
 
 	outNormal = (PushConstants.render_matrix * vec4(v.normal, 0.f)).xyz;
 	outColor = v.color.xyz * materialData.colorFactors.xyz;	
