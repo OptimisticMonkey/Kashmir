@@ -11,7 +11,6 @@
 #include <vk_types.h>
 #include <vk_pipelines.h>
 
-
 //bootstrap library
 #include "VkBootstrap.h"
 #include "imgui.h"
@@ -414,11 +413,14 @@ void VulkanEngine::init_background_pipelines()
     vkDestroyShaderModule(_device, computeDrawShader, nullptr);
     vkDestroyShaderModule(_device, gradientShader, nullptr);
     vkDestroyShaderModule(_device, skyShader, nullptr);
+    vkDestroyShaderModule(_device, gridShader, nullptr);
+    vkDestroyShaderModule(_device, TunnelShader, nullptr);
     _mainDeletionQueue.push_function([=]() {
         vkDestroyPipelineLayout(_device, _gradientPipelineLayout, nullptr);
         vkDestroyPipeline(_device, sky.pipeline, nullptr);
         vkDestroyPipeline(_device, gradient.pipeline, nullptr);
         vkDestroyPipeline(_device, grid.pipeline, nullptr);
+        vkDestroyPipeline(_device, TunnelEffect.pipeline, nullptr);
         //vkDestroyPipeline(_device, _gradientPipeline, nullptr);
         });
 
@@ -835,6 +837,8 @@ void VulkanEngine::init_imgui()
 
     // this initializes the core structures of imgui
     ImGui::CreateContext();
+
+    ImGui::GetIO().Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 18.0f);
 
     // this initializes imgui for SDL
     ImGui_ImplSDL2_InitForVulkan(_window);

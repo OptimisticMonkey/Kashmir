@@ -47,7 +47,7 @@ void main()
 	mat4 instance_transform = PushConstants.instanceTransformBuffer.transforms[gl_InstanceIndex].transform;
 	gl_Position =  sceneData.viewproj * instance_transform * position;
 
-	outNormal = (PushConstants.render_matrix * vec4(v.normal, 0.f)).xyz;
+	outNormal = normalize(mat3(instance_transform) * v.normal);
 	outColor = v.color.xyz * materialData.colorFactors.xyz;	
 	outUV.x = v.uv_x;
 	outUV.y = v.uv_y;
