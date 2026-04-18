@@ -301,7 +301,21 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 } };
 
-    file.descriptorPool.init(engine->_device, gltf.materials.size(), sizes);
+    file.descriptorPool.init(engine->_device, std::max<size_t>(1, gltf.materials.size()), sizes);
+    if (gltf.materials.empty()) {
+        fmt::print("\n");
+        fmt::print("==================================================================\n");
+        fmt::print(" WARNING: glTF '{}' contains 0 materials.\n", filePath);
+        fmt::print("   Meshes will have no MaterialInstance assigned and will not\n");
+        fmt::print("   appear in the draw loop. Fix in Blender:\n");
+        fmt::print("     Select mesh -> Properties -> Material Properties -> + New\n");
+        fmt::print("   then re-export the .glb.\n");
+        fmt::print("==================================================================\n\n");
+    }
+    else {
+        fmt::print("glTF '{}' loaded with {} material(s), {} mesh(es), {} image(s).\n",
+            filePath, gltf.materials.size(), gltf.meshes.size(), gltf.images.size());
+    }
 
 
     //-------------------------------------------
@@ -350,7 +364,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
     
     //-------------------------------------------
     // create buffer to hold the material data
-    file.materialDataBuffer = engine->create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants) * gltf.materials.size(),
+    file.materialDataBuffer = engine->create_buffer(sizeof(GLTFMetallic_Roughness::MaterialConstants) * std::max<size_t>(1, gltf.materials.size()),
         VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "MaterialDataBuffer");
     int data_index = 0;
     GLTFMetallic_Roughness::MaterialConstants* sceneMaterialConstants = (GLTFMetallic_Roughness::MaterialConstants*)file.materialDataBuffer.info.pMappedData;

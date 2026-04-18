@@ -77,16 +77,19 @@ void VulkanEngine::init()
     mainCamera.pitch = 0;
     mainCamera.yaw = 0;
 
-    std::string structurePath = { "..\\..\\assets\\structure.glb" };
+    //std::string structurePath = { "..\\..\\assets\\Simple.glb" };
+    //std::string structurePath = { "..\\..\\assets\\Suzanne.glb" };
+    //std::string structurePath = { "..\\..\\assets\\Torus.glb" };
+    //std::string structurePath = { "..\\..\\assets\\structure.glb" };
     //std::string structurePath = { "..\\..\\assets\\3boxes.glb" };
     //std::string structurePath = { "..\\..\\assets\\DamagedHelmet.glb" };
     //std::string structurePath = { "..\\..\\assets\\BasicMesh.glb" };
 
-    auto structureFile = loadGltf(this, structurePath);
+    //auto structureFile = loadGltf(this, structurePath);
 
-    assert(structureFile.has_value());
+    //assert(structureFile.has_value());
 
-    loadedScenes["structure"] = *structureFile;
+    //loadedScenes["structure"] = *structureFile;
 
 
     //everything went fine
@@ -127,7 +130,9 @@ void VulkanEngine::init_default_data()
     //    });
 
 
-    testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
+    //testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
+    testMeshes = loadGltfMeshes(this, "..\\..\\assets\\Suzanne.glb").value();
+
 
     //3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
