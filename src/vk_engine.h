@@ -69,6 +69,14 @@ struct ComputePushConstants {
 	glm::vec4 data4;
 };
 
+struct UpdateTransformPushConstants {
+	VkDeviceAddress instanceTransformBuffer;
+	float time;
+	uint32_t count;
+	float padX;
+	float padY;
+};
+
 struct ComputeEffect {
 	const char* name;
 
@@ -184,6 +192,8 @@ public:
 	VkExtent2D _windowExtent{ 1700 , 900 };
 
 	struct SDL_Window* _window{ nullptr };
+	struct _SDL_GameController* _controller{ nullptr };
+	glm::vec2 _padLeftAxis{ 0.f };
 
 	static VulkanEngine& Get();
 
@@ -197,6 +207,7 @@ public:
 	void draw();
 	void draw_geometry(VkCommandBuffer cmd);
 	void draw_background(VkCommandBuffer cmd);
+	void update_transform(VkCommandBuffer cmd);
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 	//run main loop
 	void run();
@@ -243,6 +254,9 @@ private:
 
 	void init_pipelines();
 	void init_background_pipelines();
+	void init_update_transform_pipeline();
+	VkPipeline _updateTransformPipeline;
+	VkPipelineLayout _updateTransformPipelineLayout;
 	void init_imgui();
 	VkPipelineLayout _trianglePipelineLayout;
 	VkPipeline _trianglePipeline;

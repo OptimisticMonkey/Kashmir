@@ -18,6 +18,7 @@
 #include "imgui_impl_vulkan.h"
 
 #include <chrono>
+#include <unordered_set>
 #include <thread>
 
 VulkanEngine* loadedEngine = nullptr;
@@ -30,7 +31,17 @@ constexpr bool bUseValidationLayers = true;
 void VulkanEngine::init()
 {
     // We initialize SDL and create a window with it. 
-    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
+
+    for (int i = 0; i < SDL_NumJoysticks(); i++) {
+        if (SDL_IsGameController(i)) {
+            _controller = SDL_GameControllerOpen(i);
+            if (_controller) {
+                fmt::print("Opened gamepad: {}\n", SDL_GameControllerName(_controller));
+                break;
+            }
+        }
+    }
 
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN);
 
@@ -207,9 +218,49 @@ void VulkanEngine::init_pipelines()
 {
     
     init_background_pipelines();
+    init_update_transform_pipeline();
     init_triangle_pipeline();
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
+}
+
+void VulkanEngine::init_update_transform_pipeline()
+{
+    VkPushConstantRange pushConstant{};
+    pushConstant.offset = 0;
+    pushConstant.size = sizeof(UpdateTransformPushConstants);
+    pushConstant.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstant;
+    layoutInfo.setLayoutCount = 0;
+    VK_CHECK(vkCreatePipelineLayout(_device, &layoutInfo, nullptr, &_updateTransformPipelineLayout));
+
+    VkShaderModule shader;
+    if (!vkutil::load_shader_module("../../shaders/update_transform.comp.spv", _device, &shader)) {
+        fmt::print("Error when building the update_transform compute shader \n");
+    }
+
+    VkPipelineShaderStageCreateInfo stageinfo{};
+    stageinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageinfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageinfo.module = shader;
+    stageinfo.pName = "main";
+
+    VkComputePipelineCreateInfo pipeInfo{};
+    pipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeInfo.layout = _updateTransformPipelineLayout;
+    pipeInfo.stage = stageinfo;
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &_updateTransformPipeline));
+
+    vkDestroyShaderModule(_device, shader, nullptr);
+
+    _mainDeletionQueue.push_function([=]() {
+        vkDestroyPipelineLayout(_device, _updateTransformPipelineLayout, nullptr);
+        vkDestroyPipeline(_device, _updateTransformPipeline, nullptr);
+    });
 }
 
 void VulkanEngine::init_triangle_pipeline()
@@ -921,6 +972,10 @@ void VulkanEngine::cleanup()
 
         vkb::destroy_debug_utils_messenger(_instance, _debug_messenger);
         vkDestroyInstance(_instance, nullptr);
+        if (_controller) {
+            SDL_GameControllerClose(_controller);
+            _controller = nullptr;
+        }
         SDL_DestroyWindow(_window);
     }
 
@@ -1011,6 +1066,7 @@ void VulkanEngine::draw()
     vkutil::transition_image(cmd, _drawImage.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     vkutil::transition_image(cmd, _depthImage.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
+    update_transform(cmd);
 
     draw_geometry(cmd);
 
@@ -1270,6 +1326,37 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
     }
 }
 
+void VulkanEngine::update_transform(VkCommandBuffer cmd)
+{
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _updateTransformPipeline);
+
+    float time = float(SDL_GetTicks64()) / 1000.0f;
+
+    std::unordered_set<VkDeviceAddress> dispatched;
+    for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces) {
+        if (!dispatched.insert(draw.instanceTransformBufferAddress).second) continue;
+
+        const float padScale = 10.0f;
+        UpdateTransformPushConstants pc{};
+        pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+        pc.time = time;
+        pc.count = draw.instanceCount;
+        pc.padX = _padLeftAxis.x * padScale;
+        pc.padY = -_padLeftAxis.y * padScale; // SDL Y is +down; flip so up-stick = +Y
+
+        vkCmdPushConstants(cmd, _updateTransformPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (pc.count + 63) / 64, 1, 1);
+    }
+
+    VkMemoryBarrier barrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
+}
+
 void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
 {
     VkRenderingAttachmentInfo colorAttachment = vkinit::attachment_info(targetImageView, nullptr, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -1314,6 +1401,20 @@ void VulkanEngine::run()
             // throttle the speed to avoid the endless spinning
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
+        }
+
+        // poll gamepad left stick
+        if (_controller) {
+            const float deadzone = 8000.0f;
+            const float maxRange = 32767.0f;
+            auto apply = [&](Sint16 raw) {
+                float v = (float)raw;
+                if (std::abs(v) < deadzone) return 0.f;
+                float sign = v < 0 ? -1.f : 1.f;
+                return sign * ((std::abs(v) - deadzone) / (maxRange - deadzone));
+            };
+            _padLeftAxis.x = apply(SDL_GameControllerGetAxis(_controller, SDL_CONTROLLER_AXIS_LEFTX));
+            _padLeftAxis.y = apply(SDL_GameControllerGetAxis(_controller, SDL_CONTROLLER_AXIS_LEFTY));
         }
         // imgui new frame
         ImGui_ImplVulkan_NewFrame();
@@ -1382,14 +1483,14 @@ void VulkanEngine::destroy_buffer(const AllocatedBuffer& buffer)
     VmaAllocationInfo info{};
     vmaGetAllocationInfo(_allocator, buffer.allocation, &info);
 
-    if (info.pName)
+    /*if (info.pName)
     {
         fmt::print("Destroying buffer: {}\n", info.pName);
     }
     else
     {
         fmt::print("Destroying unnamed buffer\n");
-    }
+    }*/
 
     vmaDestroyBuffer(_allocator, buffer.buffer, buffer.allocation);
     
@@ -1625,14 +1726,14 @@ void VulkanEngine::destroy_image(const AllocatedImage& img)
     VmaAllocationInfo info{};
     vmaGetAllocationInfo(_allocator, img.allocation, &info);
 
-    if (info.pName)
+   /* if (info.pName)
     {
         fmt::print("Destroying image: {}\n", info.pName);
     }
     else
     {
         fmt::print("Destroying unnamed image\n");
-    }
+    }*/
 
 
     vkDestroyImageView(_device, img.imageView, nullptr);

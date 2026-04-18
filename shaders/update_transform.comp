@@ -1,0 +1,48 @@
+#version 450
+
+#extension GL_EXT_buffer_reference : require
+
+struct InstanceTransform {
+    mat4 transform;
+};
+
+layout(buffer_reference, std430) buffer InstanceTransformBuffer {
+    InstanceTransform transforms[];
+};
+
+layout(push_constant) uniform constants {
+    InstanceTransformBuffer instanceTransformBuffer;
+    float time;
+    uint count;
+    float padX;
+    float padY;
+} pc;
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+
+    // Preserve the existing translation column, rebuild rotation each frame.
+    mat4 cur = pc.instanceTransformBuffer.transforms[i].transform;
+    vec3 pos = cur[3].xyz;
+
+    // Instance 0 is driven by the gamepad left stick.
+    if (i == 0u) {
+        pos.x = pc.padX;
+        pos.y = pc.padY;
+    }
+
+    float angle = pc.time + float(i) * 0.3;
+    float c = cos(angle);
+    float s = sin(angle);
+
+    mat4 R;
+    R[0] = vec4( c, 0.0, -s, 0.0);
+    R[1] = vec4(0.0, 1.0, 0.0, 0.0);
+    R[2] = vec4( s, 0.0,  c, 0.0);
+    R[3] = vec4(pos, 1.0);
+
+    pc.instanceTransformBuffer.transforms[i].transform = R;
+}
