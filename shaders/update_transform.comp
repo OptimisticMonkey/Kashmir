@@ -30,8 +30,8 @@ void main() {
 
     // Instance 0 is driven by the gamepad left stick.
     if (i == 0u) {
-        pos.x = pc.padX;
-        pos.y = pc.padY;
+        pos.x += pc.padX * 0.001;
+        pos.y += pc.padY * 0.001;
     }
 
     float angle = pc.time + float(i) * 0.3;

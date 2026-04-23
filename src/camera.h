@@ -1,8 +1,11 @@
 
 #include <vk_types.h>
-#include <SDL_events.h>
+#include <SDL3/SDL_events.h>
+#include <SDL3/SDL_init.h>
+#include <SDL3/SDL_gamepad.h>
 
-class Camera {
+class Camera
+{
 public:
     glm::vec3 velocity;
     glm::vec3 position;
@@ -15,6 +18,7 @@ public:
     glm::mat4 getRotationMatrix();
 
     bool IsFlying = false;
+    glm::vec2 rightStick{ 0.f };
     void processSDLEvent(SDL_Event& e);
 
     void update();

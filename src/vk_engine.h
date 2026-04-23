@@ -57,9 +57,11 @@ struct GPUSceneData {
 	glm::mat4 view;
 	glm::mat4 proj;
 	glm::mat4 viewproj;
-	glm::vec4 ambientColor;
-	glm::vec4 sunlightDirection; // w for sun power
+	glm::vec4 ambientColor;       // sky color (hemispheric ambient: surfaces facing up)
+	glm::vec4 sunlightDirection;  // w for sun power
 	glm::vec4 sunlightColor;
+	glm::vec4 cameraPos;          // world-space camera position
+	glm::vec4 groundColor;        // hemispheric ambient: surfaces facing down
 };
 
 struct ComputePushConstants {
@@ -208,6 +210,7 @@ public:
 	void draw_geometry(VkCommandBuffer cmd);
 	void draw_background(VkCommandBuffer cmd);
 	void update_transform(VkCommandBuffer cmd);
+	void DrawGround(const glm::mat4& topMatrix);
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
 	//run main loop
 	void run();
@@ -255,8 +258,11 @@ private:
 	void init_pipelines();
 	void init_background_pipelines();
 	void init_update_transform_pipeline();
+	void init_ground_pipeline();
 	VkPipeline _updateTransformPipeline;
 	VkPipelineLayout _updateTransformPipelineLayout;
+	MaterialPipeline _groundPipeline;   // layout shared with metalRoughMaterial
+	MaterialInstance _groundMaterial;
 	void init_imgui();
 	VkPipelineLayout _trianglePipelineLayout;
 	VkPipeline _trianglePipeline;
@@ -273,6 +279,8 @@ private:
 	void init_default_data();
 
 	std::vector<std::shared_ptr<MeshAsset>> testMeshes;
+
+	std::shared_ptr<MeshNode> _groundNode;
 
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 };

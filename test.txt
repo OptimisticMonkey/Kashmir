@@ -1,0 +1,10 @@
+This is a brand new text file.
+I am learning to type and learning to use Neovim.
+Lol
+Lol
+
+Wow, practice is time consuming.  Fun, but sure takes some effort.
+
+
+
+
