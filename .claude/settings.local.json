@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake --build . --config Debug)",
+      "Bash(curl -fsSL \"https://raw.githubusercontent.com/ocornut/imgui/v1.90.6/backends/imgui_impl_sdl3.cpp\" -o /e/VULKAN/Kashmir/third_party/imgui/imgui_impl_sdl3.cpp)",
+      "Bash(curl -fsSL \"https://raw.githubusercontent.com/ocornut/imgui/v1.90.6/backends/imgui_impl_sdl3.h\" -o /e/VULKAN/Kashmir/third_party/imgui/imgui_impl_sdl3.h)",
+      "Bash(grep -v -E \"^//|^\\\\s*$|^/\\\\*|\\\\*/|^\\\\s*\\\\*\" /e/VULKAN/Kashmir/third_party/imgui/imconfig.h)",
+      "Bash(cmake --build /e/VULKAN/Kashmir/build --config Debug)"
+    ]
+  }
+}

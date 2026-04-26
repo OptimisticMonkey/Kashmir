@@ -194,7 +194,7 @@ public:
 	VkExtent2D _windowExtent{ 1700 , 900 };
 
 	struct SDL_Window* _window{ nullptr };
-	struct _SDL_GameController* _controller{ nullptr };
+	struct SDL_Gamepad* _controller{ nullptr };
 	glm::vec2 _padLeftAxis{ 0.f };
 
 	static VulkanEngine& Get();

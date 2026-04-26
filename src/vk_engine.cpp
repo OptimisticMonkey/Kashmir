@@ -14,7 +14,7 @@
 // bootstrap library
 #include "VkBootstrap.h"
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
+#include "imgui_impl_sdl3.h"
 #include "imgui_impl_vulkan.h"
 
 #include <chrono>
@@ -33,26 +33,31 @@ constexpr bool bUseValidationLayers = true;
 void VulkanEngine::init()
 {
     // We initialize SDL and create a window with it.
-    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
 
-    for (int i = 0; i < SDL_NumJoysticks(); i++)
+    int num_joysticks = 0;
+    SDL_JoystickID* joystick_ids = SDL_GetJoysticks(&num_joysticks);
+    if (joystick_ids)
     {
-        if (SDL_IsGameController(i))
+        for (int i = 0; i < num_joysticks; i++)
         {
-            _controller = SDL_GameControllerOpen(i);
-            if (_controller)
+            SDL_JoystickID jid = joystick_ids[i];
+            if (SDL_IsGamepad(jid))
             {
-                fmt::print("Opened gamepad: {}\n", SDL_GameControllerName(_controller));
-                break;
+                _controller = SDL_OpenGamepad(jid);
+                if (_controller)
+                {
+                    fmt::print("Opened gamepad: {}\n", SDL_GetGamepadName(_controller));
+                    break;
+                }
             }
         }
+        SDL_free(joystick_ids);
     }
 
     SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN);
 
     _window = SDL_CreateWindow("Vulkan Engine",
-                               SDL_WINDOWPOS_UNDEFINED,
-                               SDL_WINDOWPOS_UNDEFINED,
                                _windowExtent.width,
                                _windowExtent.height,
                                window_flags);
@@ -722,7 +727,7 @@ void VulkanEngine::init_vulkan()
     _instance = vkb_inst.instance;
     _debug_messenger = vkb_inst.debug_messenger;
 
-    SDL_Vulkan_CreateSurface(_window, _instance, &_surface);
+    SDL_Vulkan_CreateSurface(_window, _instance, nullptr, &_surface);
 
     // vulkan 1.3 features
     VkPhysicalDeviceVulkan13Features features{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
@@ -994,7 +999,7 @@ void VulkanEngine::init_imgui()
     ImGui::GetIO().Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 18.0f);
 
     // this initializes imgui for SDL
-    ImGui_ImplSDL2_InitForVulkan(_window);
+    ImGui_ImplSDL3_InitForVulkan(_window);
 
     // this initializes imgui for Vulkan
     ImGui_ImplVulkan_InitInfo init_info = {};
@@ -1082,7 +1087,7 @@ void VulkanEngine::cleanup()
         vkDestroyInstance(_instance, nullptr);
         if (_controller)
         {
-            SDL_GameControllerClose(_controller);
+            SDL_CloseGamepad(_controller);
             _controller = nullptr;
         }
         SDL_DestroyWindow(_window);
@@ -1466,7 +1471,7 @@ void VulkanEngine::update_transform(VkCommandBuffer cmd)
 {
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _updateTransformPipeline);
 
-    float time = float(SDL_GetTicks64()) / 1000.0f;
+    float time = float(SDL_GetTicks()) / 1000.0f;
 
     VkDeviceAddress groundAddr = _groundNode ? _groundNode->mesh->meshBuffers.instanceTransformBufferAddress : 0;
 
@@ -1530,24 +1535,21 @@ void VulkanEngine::run()
         while (SDL_PollEvent(&e) != 0)
         {
             // close the window when user alt-f4s or clicks the X button
-            if (e.type == SDL_QUIT)
+            if (e.type == SDL_EVENT_QUIT)
                 bQuit = true;
 
-            if (e.type == SDL_WINDOWEVENT)
+            if (e.type == SDL_EVENT_WINDOW_MINIMIZED)
             {
-                if (e.window.event == SDL_WINDOWEVENT_MINIMIZED)
-                {
-                    stop_rendering = true;
-                }
-                if (e.window.event == SDL_WINDOWEVENT_RESTORED)
-                {
-                    stop_rendering = false;
-                }
+                stop_rendering = true;
+            }
+            if (e.type == SDL_EVENT_WINDOW_RESTORED)
+            {
+                stop_rendering = false;
             }
 
             // send SDL event to imgui for handling
             mainCamera.processSDLEvent(e);
-            ImGui_ImplSDL2_ProcessEvent(&e);
+            ImGui_ImplSDL3_ProcessEvent(&e);
         }
 
         // do not draw if we are minimized
@@ -1571,12 +1573,12 @@ void VulkanEngine::run()
                 float sign = v < 0 ? -1.f : 1.f;
                 return sign * ((std::abs(v) - deadzone) / (maxRange - deadzone));
             };
-            _padLeftAxis.x = apply(SDL_GameControllerGetAxis(_controller, SDL_CONTROLLER_AXIS_LEFTX));
-            _padLeftAxis.y = apply(SDL_GameControllerGetAxis(_controller, SDL_CONTROLLER_AXIS_LEFTY));
+            _padLeftAxis.x = apply(SDL_GetGamepadAxis(_controller, SDL_GAMEPAD_AXIS_LEFTX));
+            _padLeftAxis.y = apply(SDL_GetGamepadAxis(_controller, SDL_GAMEPAD_AXIS_LEFTY));
         }
         // imgui new frame
         ImGui_ImplVulkan_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
         // some imgui UI to test
         ImGui::ShowDemoWindow();
@@ -1998,7 +2000,7 @@ void VulkanEngine::update_scene()
 
     ComputeEffect& effect = backgroundEffects[currentBackgroundEffect];
 
-    double seconds_since_start = SDL_GetTicks64() / 1000.0; // use SDL_GetTicks() if pre-2.0.18
+    double seconds_since_start = SDL_GetTicks() / 1000.0;
 
     effect.data.data4.r = seconds_since_start;
 }

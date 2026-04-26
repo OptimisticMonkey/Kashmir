@@ -1,5 +1,10 @@
 find_package(Vulkan REQUIRED)
 
+# SDL3 ships with the Vulkan SDK. Locate it via its installed CMake package.
+if(NOT TARGET SDL3::SDL3)
+  find_package(SDL3 CONFIG REQUIRED HINTS "$ENV{VULKAN_SDK}/cmake" "$ENV{VULKAN_SDK}")
+endif()
+
 add_library(vkbootstrap STATIC)
 add_library(glm INTERFACE)
 add_library(vma INTERFACE)
@@ -8,7 +13,8 @@ add_library(stb_image INTERFACE)
 
 add_subdirectory(fastgltf)
 add_subdirectory(fmt EXCLUDE_FROM_ALL)
-add_subdirectory(SDL EXCLUDE_FROM_ALL)
+# SDL2 is no longer built from source; SDL3 from the Vulkan SDK is used.
+# add_subdirectory(SDL EXCLUDE_FROM_ALL)
 
 target_sources(vkbootstrap PRIVATE 
   vkbootstrap/VkBootstrap.h
@@ -44,9 +50,9 @@ target_sources(imgui PRIVATE
   imgui/imgui_widgets.cpp
   imgui/imgui_tables.cpp
   imgui/imgui_impl_vulkan.cpp
-  imgui/imgui_impl_sdl2.cpp
+  imgui/imgui_impl_sdl3.cpp
   )
 
-target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL2::SDL2)
+target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3)
 
 target_include_directories(stb_image INTERFACE stb_image)

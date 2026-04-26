@@ -11,6 +11,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(Vulkan REQUIRED)
 
+# SDL3 ships with the Vulkan SDK.
+find_package(SDL3 CONFIG REQUIRED HINTS "$ENV{VULKAN_SDK}/cmake" "$ENV{VULKAN_SDK}")
+
 add_subdirectory(third_party)
 
 set (CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
