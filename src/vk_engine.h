@@ -282,5 +282,8 @@ private:
 
 	std::shared_ptr<MeshNode> _groundNode;
 
+	uint32_t _monkeyInstanceCount{ 0 };
+	double _lastMonkeySpawnTime{ 0.0 };
+
 	std::unordered_map<std::string, std::shared_ptr<LoadedGLTF>> loadedScenes;
 };

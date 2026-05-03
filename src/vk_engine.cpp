@@ -18,6 +18,8 @@
 #include "imgui_impl_vulkan.h"
 
 #include <chrono>
+#include <cmath>
+#include <random>
 #include <unordered_set>
 #include <thread>
 
@@ -287,9 +289,9 @@ void VulkanEngine::init_pipelines()
 void VulkanEngine::init_ground_pipeline()
 {
     VkShaderModule fragShader;
-    if (!vkutil::load_shader_module("../../shaders/mesh.frag.spv", _device, &fragShader))
+    if (!vkutil::load_shader_module("../../shaders/ground.frag.spv", _device, &fragShader))
     {
-        fmt::println("Error loading mesh.frag.spv for ground pipeline");
+        fmt::println("Error loading ground.frag.spv for ground pipeline");
     }
     VkShaderModule vertShader;
     if (!vkutil::load_shader_module("../../shaders/ground.vert.spv", _device, &vertShader))
@@ -1697,10 +1699,24 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
                                            "IndexBuffer");
 
     std::vector<InstanceTransform> transforms;
+    std::mt19937 rng{ std::random_device{}() };
+    std::uniform_real_distribution<float> unitDist{ 0.f, 1.f };
+    std::uniform_real_distribution<float> angleDist{ 0.f, 6.28318530718f };
+
     for (int i = 0; i < MAX_INSTANCE_COUNT; i++)
     {
+        const float z = unitDist(rng) * 2.f - 1.f;
+        const float theta = angleDist(rng);
+        const float radius = 5.f * std::cbrt(unitDist(rng));
+        const float xyRadius = std::sqrt(1.f - z * z);
+        const glm::vec3 position{
+            radius * xyRadius * std::cos(theta),
+            radius * xyRadius * std::sin(theta),
+            radius * z
+        };
+
         InstanceTransform t;
-        glm::mat4 mat = glm::translate(glm::vec3(i * 3, i * 3, 0));
+        glm::mat4 mat = glm::translate(position);
         t.transform = mat;
         transforms.push_back(t);
     }
@@ -1969,8 +1985,23 @@ void VulkanEngine::update_scene()
 
     //  Keep a vector of Actors that have transform, and a pointer to loaded node
 
+    const double now = SDL_GetTicks() / 1000.0;
+    if (_monkeyInstanceCount == 0)
+    {
+        _monkeyInstanceCount = 1;
+        _lastMonkeySpawnTime = now;
+    }
+    else
+    {
+        while (_monkeyInstanceCount < MAX_INSTANCE_COUNT && now - _lastMonkeySpawnTime >= 1.0)
+        {
+            _monkeyInstanceCount++;
+            _lastMonkeySpawnTime += 1.0;
+        }
+    }
+
     glm::mat4 T;
-    loadedNodes["Suzanne"]->Draw(T, mainDrawContext, 10);
+    loadedNodes["Suzanne"]->Draw(T, mainDrawContext, _monkeyInstanceCount);
 
     DrawGround(glm::translate(glm::mat4{ 1.f }, glm::vec3(0.f, -100.f, 0.f)));
 
