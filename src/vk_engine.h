@@ -57,6 +57,7 @@ struct GPUSceneData {
 	glm::mat4 view;
 	glm::mat4 proj;
 	glm::mat4 viewproj;
+	glm::mat4 lightViewProj;      // sun's view-projection (for shadow mapping)
 	glm::vec4 ambientColor;       // sky color (hemispheric ambient: surfaces facing up)
 	glm::vec4 sunlightDirection;  // w for sun power
 	glm::vec4 sunlightColor;
@@ -187,6 +188,13 @@ public:
 	AllocatedImage _depthImage;
 	VkExtent2D _drawExtent;
 
+	// Shadow map (single directional sun, single cascade).
+	AllocatedImage _shadowImage;
+	VkSampler _shadowSampler{ VK_NULL_HANDLE };
+	VkExtent2D _shadowExtent{ 2048, 2048 };
+	VkPipeline _shadowPipeline{ VK_NULL_HANDLE };
+	VkPipelineLayout _shadowPipelineLayout{ VK_NULL_HANDLE };
+
 
 	bool _isInitialized{ false };
 	int _frameNumber {0};
@@ -209,6 +217,7 @@ public:
 	void draw();
 	void draw_geometry(VkCommandBuffer cmd);
 	void draw_background(VkCommandBuffer cmd);
+	void draw_shadow(VkCommandBuffer cmd);
 	void update_transform(VkCommandBuffer cmd);
 	void DrawGround(const glm::mat4& topMatrix);
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
@@ -259,6 +268,8 @@ private:
 	void init_background_pipelines();
 	void init_update_transform_pipeline();
 	void init_ground_pipeline();
+	void init_shadow_resources();
+	void init_shadow_pipeline();
 	VkPipeline _updateTransformPipeline;
 	VkPipelineLayout _updateTransformPipelineLayout;
 	MaterialPipeline _groundPipeline;   // layout shared with metalRoughMaterial

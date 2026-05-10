@@ -1,0 +1,11 @@
+{
+	"InstallScripts" : 
+	[
+		"E:/VULKAN/Kashmir/build-vim/cmake_install.cmake",
+		"E:/VULKAN/Kashmir/build-vim/third_party/cmake_install.cmake",
+		"E:/VULKAN/Kashmir/build-vim/third_party/fastgltf/cmake_install.cmake",
+		"E:/VULKAN/Kashmir/build-vim/third_party/fmt/cmake_install.cmake",
+		"E:/VULKAN/Kashmir/build-vim/src/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

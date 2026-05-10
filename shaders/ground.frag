@@ -7,6 +7,7 @@ layout (location = 0) in vec3 inNormal;
 layout (location = 1) in vec3 inColor;
 layout (location = 2) in vec2 inUV;
 layout (location = 3) in vec3 inWorldPos;
+layout (location = 4) in vec4 inShadowCoord;
 
 layout (location = 0) out vec4 outFragColor;
 
@@ -47,10 +48,11 @@ void main()
     float roughness = clamp(mr.g * materialData.metal_rough_factors.y, 0.04, 1.0);
 
     // Point light — Unreal-style inverse-square falloff with a smooth radius window.
-    // Tweak these (or wire to push constants/scene data later).
+    // Reduced intensity so the directional sun (and its shadows) dominates the
+    // visible ground lighting; the point light now reads as a subtle accent.
     const vec3  lightPos       = vec3(0.0, 0.0, 0.0);
     const float lightRadius    = 300.0;
-    const float lightIntensity = 50000.0;
+    const float lightIntensity = 2000.0;
 
     vec3  toLight = lightPos - inWorldPos;
     float distSq  = dot(toLight, toLight);
@@ -89,12 +91,27 @@ void main()
     vec3 lightRadiance = sceneData.sunlightColor.rgb * attenuation;
     vec3 Lo            = (diffuse + specular) * lightRadiance * NoL;
 
+
+    Lo *= sampleShadow(inShadowCoord);
+
+    // Directional sun contribution — modulated by the shadow map so that
+    // suzanne instances cast visible shadows on the ground.
+    // {
+    //     vec3  Lsun   = normalize(sceneData.sunlightDirection.xyz);
+    //     float NoLsun = max(dot(N, Lsun), 0.0);
+    //     vec3  sun    = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
+    //     float shadow = sampleShadow(inShadowCoord);
+    //     // Diffuse-only sun on the ground (specular for a flat plane is uninteresting here).
+    //     Lo += (albedo / PI) * sun * NoLsun * shadow * (1.0 - metallic);
+    // }
+
     // Hemispheric ambient — keeps surfaces outside the light's reach from being pure black.
     float upMix = N.y * 0.5 + 0.5;
     vec3 hemi = mix(sceneData.groundColor.rgb, sceneData.ambientColor.rgb, upMix);
     vec3 ambient = hemi * albedo * (1.0 - metallic);
 
-    vec3 color = ambient + Lo;
+    //vec3 color = ambient + Lo;
+    vec3 color = Lo;
 
     // Reinhard tonemap then gamma encode (helps banding by spending bits in perceptual space).
     color = color / (color + vec3(1.0));

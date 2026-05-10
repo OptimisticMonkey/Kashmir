@@ -280,6 +280,8 @@ void VulkanEngine::init_pipelines()
 
     init_background_pipelines();
     init_update_transform_pipeline();
+    init_shadow_resources();
+    init_shadow_pipeline();
     init_triangle_pipeline();
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
@@ -324,6 +326,98 @@ void VulkanEngine::init_ground_pipeline()
         {
             vkDestroyPipeline(_device, _groundPipeline.pipeline, nullptr);
             // layout is owned by metalRoughMaterial, don't destroy here
+        });
+}
+
+void VulkanEngine::init_shadow_resources()
+{
+    // Offscreen depth target sampled by lighting shaders. Sized independently of
+    // the swapchain (so a window resize does not invalidate it).
+    VkExtent3D extent{ _shadowExtent.width, _shadowExtent.height, 1 };
+    VkImageUsageFlags usage =
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    _shadowImage = create_image(extent, VK_FORMAT_D32_SFLOAT, usage, false, "ShadowMap");
+
+    // Sampler used by mesh.frag / ground.frag to read the shadow map.
+    // clamp-to-border with white border = "lit" for fragments outside the light's frustum.
+    VkSamplerCreateInfo samplerInfo{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    // Reverse-Z: large depth value = close to light = "fully lit".
+    samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    VK_CHECK(vkCreateSampler(_device, &samplerInfo, nullptr, &_shadowSampler));
+
+    AllocatedImage shadowImage = _shadowImage;
+    VkSampler shadowSampler = _shadowSampler;
+    VkDevice device = _device;
+    VmaAllocator allocator = _allocator;
+    _mainDeletionQueue.push_function(
+        [shadowImage, shadowSampler, device, allocator]()
+        {
+            vkDestroySampler(device, shadowSampler, nullptr);
+            vkDestroyImageView(device, shadowImage.imageView, nullptr);
+            vmaDestroyImage(allocator, shadowImage.image, shadowImage.allocation);
+        });
+}
+
+void VulkanEngine::init_shadow_pipeline()
+{
+    VkShaderModule shadowVert;
+    if (!vkutil::load_shader_module("../../shaders/shadow.vert.spv", _device, &shadowVert))
+    {
+        fmt::println("Error loading shadow.vert.spv for shadow pipeline");
+    }
+    VkShaderModule shadowFrag;
+    if (!vkutil::load_shader_module("../../shaders/shadow.frag.spv", _device, &shadowFrag))
+    {
+        fmt::println("Error loading shadow.frag.spv for shadow pipeline");
+    }
+
+    // Shadow pass uses the scene UBO for `lightViewProj` (set 0) and the same
+    // GPUDrawPushConstants layout as the camera pass (so we can iterate the
+    // existing OpaqueSurfaces without rebuilding any data).
+    VkPushConstantRange pushRange{};
+    pushRange.offset = 0;
+    pushRange.size = sizeof(GPUDrawPushConstants);
+    pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+    VkDescriptorSetLayout setLayouts[] = { _gpuSceneDataDescriptorLayout };
+    VkPipelineLayoutCreateInfo layoutInfo = vkinit::pipeline_layout_create_info();
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = setLayouts;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    VK_CHECK(vkCreatePipelineLayout(_device, &layoutInfo, nullptr, &_shadowPipelineLayout));
+
+    PipelineBuilder pb;
+    pb.set_shaders(shadowVert, shadowFrag);
+    pb.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    pb.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    // Front-face culling reduces self-shadow acne on caster geometry.
+    pb.set_cull_mode(VK_CULL_MODE_FRONT_BIT, VK_FRONT_FACE_CLOCKWISE);
+    pb.set_multisampling_none();
+    pb.disable_blending();
+    // Reverse-Z: clear to 0, keep larger values (closer to light).
+    pb.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    pb.set_depth_format(_shadowImage.imageFormat);
+    // No color attachment — depth-only render. (PipelineBuilder handles
+    // colorAttachmentCount == 0.)
+    pb._pipelineLayout = _shadowPipelineLayout;
+
+    _shadowPipeline = pb.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, shadowVert, nullptr);
+    vkDestroyShaderModule(_device, shadowFrag, nullptr);
+
+    _mainDeletionQueue.push_function(
+        [=]()
+        {
+            vkDestroyPipelineLayout(_device, _shadowPipelineLayout, nullptr);
+            vkDestroyPipeline(_device, _shadowPipeline, nullptr);
         });
 }
 
@@ -650,6 +744,7 @@ void VulkanEngine::init_descriptors()
     {
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
         _gpuSceneDataDescriptorLayout =
             builder.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
@@ -1188,6 +1283,11 @@ void VulkanEngine::draw()
 
     update_transform(cmd);
 
+    // Render the directional shadow map after instance transforms are written
+    // (the shadow vertex shader reads the same instance transform buffer the
+    // camera pass uses) and before the lighting passes that sample it.
+    draw_shadow(cmd);
+
     draw_geometry(cmd);
 
     // transition the draw image and the swapchain image into their correct transfer layouts
@@ -1395,6 +1495,14 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     DescriptorWriter writer;
     writer.write_buffer(0, gpuSceneDataBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+    // Shadow map sampled by mesh.frag / ground.frag. draw_shadow has already
+    // transitioned the image to SHADER_READ_ONLY_OPTIMAL by the time this
+    // descriptor set is consumed.
+    writer.write_image(1,
+                       _shadowImage.imageView,
+                       _shadowSampler,
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     writer.update_set(_device, globalDescriptor);
 
     // push_constants.vertexBuffer = testMeshes[2]->meshBuffers.vertexBufferAddress;
@@ -1467,6 +1575,107 @@ void VulkanEngine::draw_background(VkCommandBuffer cmd)
     {
         vkCmdDispatch(cmd, std::ceil(_drawExtent.width / 16.0), std::ceil(_drawExtent.height / 16.0), 1);
     }
+}
+
+void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
+{
+    // Per-frame UBO that the shadow vertex shader reads (set 0). Matches the
+    // allocation pattern in draw_geometry — frame deletion queue tears it down.
+    AllocatedBuffer shadowSceneBuffer = create_buffer(
+        sizeof(GPUSceneData), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "ShadowSceneData");
+    get_current_frame()._deletionQueue.push_function([=, this]() { destroy_buffer(shadowSceneBuffer); });
+    memcpy(shadowSceneBuffer.info.pMappedData, &sceneData, sizeof(GPUSceneData));
+    vmaFlushAllocation(_allocator, shadowSceneBuffer.allocation, 0, VK_WHOLE_SIZE);
+
+    VkDescriptorSet shadowSceneSet =
+        get_current_frame()._frameDescriptors.allocate(_device, _gpuSceneDataDescriptorLayout);
+    {
+        DescriptorWriter writer;
+        writer.write_buffer(
+            0, shadowSceneBuffer.buffer, sizeof(GPUSceneData), 0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        // Bind the shadow image to its own sampler slot (binding 1) — the shadow
+        // pass itself doesn't read it, but the descriptor layout requires every
+        // binding to be populated. Use SHADER_READ_ONLY_OPTIMAL since that's the
+        // only valid layout outside this pass; the depth image will be
+        // transitioned to DEPTH_ATTACHMENT below before rendering.
+        writer.write_image(1,
+                           _shadowImage.imageView,
+                           _shadowSampler,
+                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        writer.update_set(_device, shadowSceneSet);
+    }
+
+    // Transition the shadow image to depth-attachment layout for writing.
+    vkutil::transition_image(cmd,
+                             _shadowImage.image,
+                             VK_IMAGE_LAYOUT_UNDEFINED,
+                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_ASPECT_DEPTH_BIT);
+
+    VkRenderingAttachmentInfo depthAttachment =
+        vkinit::depth_attachment_info(_shadowImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+    // Reverse-Z: clear to 0 (= farthest from light).
+    depthAttachment.clearValue.depthStencil = { 0.f, 0 };
+
+    VkRenderingInfo renderInfo = vkinit::rendering_info(_shadowExtent, nullptr, &depthAttachment);
+    // No color attachment.
+    renderInfo.colorAttachmentCount = 0;
+    renderInfo.pColorAttachments = nullptr;
+
+    vkCmdBeginRendering(cmd, &renderInfo);
+
+    VkViewport viewport{};
+    viewport.x = 0.f;
+    viewport.y = 0.f;
+    viewport.width = (float)_shadowExtent.width;
+    viewport.height = (float)_shadowExtent.height;
+    viewport.minDepth = 0.f;
+    viewport.maxDepth = 1.f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.offset = { 0, 0 };
+    scissor.extent = _shadowExtent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline);
+    vkCmdBindDescriptorSets(
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipelineLayout, 0, 1, &shadowSceneSet, 0, nullptr);
+
+    // Skip ground (flat plane, no meaningful shadow contribution + has no instance
+    // transform buffer for the shadow.vert to read). Same filter as update_transform.
+    VkDeviceAddress groundAddr =
+        _groundNode ? _groundNode->mesh->meshBuffers.instanceTransformBufferAddress : 0;
+
+    for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces)
+    {
+        if (draw.instanceTransformBufferAddress == groundAddr)
+            continue;
+
+        vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+
+        GPUDrawPushConstants pc;
+        pc.worldMatrix = draw.transform;
+        pc.vertexBuffer = draw.vertexBufferAddress;
+        pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+        vkCmdPushConstants(
+            cmd, _shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+
+        vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+    }
+
+    vkCmdEndRendering(cmd);
+
+    // Hand the shadow image off to the lighting shaders for sampling.
+    // Pass the depth aspect explicitly — the stock transition_image picks the
+    // aspect from the new layout, and SHADER_READ_ONLY_OPTIMAL would default
+    // to the color aspect, which would leave the depth aspect un-transitioned.
+    vkutil::transition_image(cmd,
+                             _shadowImage.image,
+                             VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             VK_IMAGE_ASPECT_DEPTH_BIT);
 }
 
 void VulkanEngine::update_transform(VkCommandBuffer cmd)
@@ -1983,6 +2192,22 @@ void VulkanEngine::update_scene()
     sceneData.sunlightDirection = glm::vec4(0, 1, 0.5, 1.f);
     sceneData.cameraPos = glm::vec4(mainCamera.position, 1.f);
 
+    // Shadow caster view-projection from the sun's perspective. Hand-tuned ortho
+    // box covering the suzanne instance cloud near origin (radius ~5) plus the
+    // ground patch directly behind it where shadows are cast (~50 units along
+    // the light's anti-direction). A scene-AABB-driven fit is a follow-up.
+    {
+        glm::vec3 lightDir = glm::normalize(glm::vec3(sceneData.sunlightDirection));
+        glm::vec3 lightPos = lightDir * 150.f;
+        glm::mat4 lightView = glm::lookAt(lightPos, glm::vec3(0.f), glm::vec3(0.f, 1.f, 0.f));
+        // Reverse-Z: pass near in the position normally reserved for far so that
+        // gl_Position.z grows with proximity to the light (matches the camera pass).
+        glm::mat4 lightProj = glm::ortho(-60.f, 60.f, -60.f, 60.f, 300.f, 1.f);
+        // Vulkan clip-space Y matches the inverted camera projection above.
+        lightProj[1][1] *= -1;
+        sceneData.lightViewProj = lightProj * lightView;
+    }
+
     //  Keep a vector of Actors that have transform, and a pointer to loaded node
 
     const double now = SDL_GetTicks() / 1000.0;
@@ -2003,7 +2228,7 @@ void VulkanEngine::update_scene()
     glm::mat4 T;
     loadedNodes["Suzanne"]->Draw(T, mainDrawContext, _monkeyInstanceCount);
 
-    DrawGround(glm::translate(glm::mat4{ 1.f }, glm::vec3(0.f, -100.f, 0.f)));
+    DrawGround(glm::translate(glm::mat4{ 1.f }, glm::vec3(0.f, -10.f, 0.f)));
 
     // for (size_t i = 0; i < 10; i++)
     //{

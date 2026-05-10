@@ -1,0 +1,10 @@
+^E:\VULKAN\KASHMIR\BUILD-VIM\CMAKEFILES\7E31ED970CA406669BED91F0F4EED411\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SE:/VULKAN/Kashmir -BE:/VULKAN/Kashmir/build-vim --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file E:/VULKAN/Kashmir/build-vim/Kashmir.slnx
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

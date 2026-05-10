@@ -1,0 +1,16 @@
+E:/VULKAN/Kashmir/build-vim/CMakeFiles/Shaders.dir
+E:/VULKAN/Kashmir/build-vim/CMakeFiles/INSTALL.dir
+E:/VULKAN/Kashmir/build-vim/CMakeFiles/ALL_BUILD.dir
+E:/VULKAN/Kashmir/build-vim/CMakeFiles/ZERO_CHECK.dir
+E:/VULKAN/Kashmir/build-vim/third_party/CMakeFiles/vkbootstrap.dir
+E:/VULKAN/Kashmir/build-vim/third_party/CMakeFiles/imgui.dir
+E:/VULKAN/Kashmir/build-vim/third_party/CMakeFiles/INSTALL.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fastgltf/CMakeFiles/fastgltf_simdjson.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fastgltf/CMakeFiles/fastgltf.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fastgltf/CMakeFiles/INSTALL.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fastgltf/CMakeFiles/ALL_BUILD.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fmt/CMakeFiles/fmt.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fmt/CMakeFiles/INSTALL.dir
+E:/VULKAN/Kashmir/build-vim/third_party/fmt/CMakeFiles/ALL_BUILD.dir
+E:/VULKAN/Kashmir/build-vim/src/CMakeFiles/engine.dir
+E:/VULKAN/Kashmir/build-vim/src/CMakeFiles/INSTALL.dir

@@ -89,8 +89,11 @@ VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
 
     colorBlending.logicOpEnable = VK_FALSE;
     colorBlending.logicOp = VK_LOGIC_OP_COPY;
-    colorBlending.attachmentCount = 1;
-    colorBlending.pAttachments = &_colorBlendAttachment;
+    // depth-only pipelines (e.g. shadow pass) skip set_color_attachment_format,
+    // leaving _renderInfo.colorAttachmentCount at 0 — the blend-state attachmentCount
+    // must match, and pAttachments must be null in that case.
+    colorBlending.attachmentCount = _renderInfo.colorAttachmentCount;
+    colorBlending.pAttachments = _renderInfo.colorAttachmentCount > 0 ? &_colorBlendAttachment : nullptr;
 
     // completely clear VertexInputStateCreateInfo, as we have no need for it
     VkPipelineVertexInputStateCreateInfo _vertexInputInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -147,8 +150,12 @@ void PipelineBuilder::set_shaders(VkShaderModule vertexShader, VkShaderModule fr
     _shaderStages.push_back(
         vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertexShader));
 
-    _shaderStages.push_back(
-        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader));
+    // Allow depth-only pipelines (shadow pass) to skip the fragment stage.
+    if (fragmentShader != VK_NULL_HANDLE)
+    {
+        _shaderStages.push_back(
+            vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader));
+    }
 }
 
 void PipelineBuilder::set_input_topology(VkPrimitiveTopology topology)

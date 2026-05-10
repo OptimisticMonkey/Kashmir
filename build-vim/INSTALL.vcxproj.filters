@@ -1,0 +1,13 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="18.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <CustomBuild Include="E:\VULKAN\Kashmir\build-vim\CMakeFiles\7e31ed970ca406669bed91f0f4eed411\INSTALL_force.rule">
+      <Filter>CMake Rules</Filter>
+    </CustomBuild>
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="CMake Rules">
+      <UniqueIdentifier>{8FA61934-8285-3362-B4E7-1EE6977D5A6F}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

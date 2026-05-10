@@ -7,6 +7,7 @@ layout (location = 0) in vec3 inNormal;
 layout (location = 1) in vec3 inColor;
 layout (location = 2) in vec2 inUV;
 layout (location = 3) in vec3 inWorldPos;
+layout (location = 4) in vec4 inShadowCoord;
 
 layout (location = 0) out vec4 outFragColor;
 
@@ -66,7 +67,8 @@ void main()
     vec3 diffuse = kd * albedo / PI;
 
     vec3 sun = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
-    vec3 Lo  = (diffuse + specular) * sun * NoL;
+    float shadow = sampleShadow(inShadowCoord);
+    vec3 Lo  = (diffuse + specular) * sun * NoL * shadow;
 
     // Hemispheric ambient: blend sky/ground by N.y.
     float upMix = N.y * 0.5 + 0.5;

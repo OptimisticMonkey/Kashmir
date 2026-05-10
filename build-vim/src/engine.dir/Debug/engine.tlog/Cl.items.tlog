@@ -1,0 +1,9 @@
+E:\VULKAN\Kashmir\build-vim\src\CMakeFiles\engine.dir\cmake_pch.cxx;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\cmake_pch.obj
+E:\VULKAN\Kashmir\src\main.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\main.obj
+E:\VULKAN\Kashmir\src\vk_initializers.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_initializers.obj
+E:\VULKAN\Kashmir\src\vk_images.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_images.obj
+E:\VULKAN\Kashmir\src\vk_descriptors.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_descriptors.obj
+E:\VULKAN\Kashmir\src\vk_pipelines.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_pipelines.obj
+E:\VULKAN\Kashmir\src\vk_engine.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_engine.obj
+E:\VULKAN\Kashmir\src\vk_loader.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\vk_loader.obj
+E:\VULKAN\Kashmir\src\camera.cpp;E:\VULKAN\Kashmir\build-vim\src\engine.dir\Debug\camera.obj
