@@ -22,7 +22,49 @@ set (CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_SOURCE_DIR}/bin")
 add_subdirectory(src)
 
 find_program(GLSL_VALIDATOR glslangValidator HINTS /usr/bin /usr/local/bin $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
+find_program(SLANGC slangc HINTS $ENV{VULKAN_SDK}/Bin/ $ENV{VULKAN_SDK}/Bin32/)
 
+set(SPIRV_BINARY_FILES "")
+
+# --- Slang sources: shaders/<basename>.<stage>.slang -> shaders/<basename>.<stage>.spv
+# `common.slang` is imported by other shaders and is not compiled standalone.
+file(GLOB_RECURSE SLANG_SOURCE_FILES "${PROJECT_SOURCE_DIR}/shaders/*.slang")
+foreach(SLANG ${SLANG_SOURCE_FILES})
+    get_filename_component(FILE_NAME ${SLANG} NAME)
+    if(FILE_NAME STREQUAL "common.slang")
+        continue()
+    endif()
+    string(REGEX MATCH "\\.(vert|frag|comp)\\.slang$" STAGE_MATCH ${FILE_NAME})
+    if(NOT STAGE_MATCH)
+        message(FATAL_ERROR "Slang file ${FILE_NAME} must end in .vert.slang, .frag.slang, or .comp.slang")
+    endif()
+    set(STAGE_FLAG ${CMAKE_MATCH_1})
+    if(STAGE_FLAG STREQUAL "vert")
+        set(SLANG_STAGE "vertex")
+    elseif(STAGE_FLAG STREQUAL "frag")
+        set(SLANG_STAGE "fragment")
+    elseif(STAGE_FLAG STREQUAL "comp")
+        set(SLANG_STAGE "compute")
+    endif()
+    string(REGEX REPLACE "\\.slang$" ".spv" SPV_NAME ${FILE_NAME})
+    set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${SPV_NAME}")
+    message(STATUS "Slang: ${FILE_NAME} -> ${SPV_NAME}")
+    add_custom_command(
+        OUTPUT ${SPIRV}
+        COMMAND ${SLANGC} ${SLANG}
+            -profile spirv_1_5
+            -target spirv
+            -emit-spirv-directly
+            -fvk-use-entrypoint-name
+            -entry main
+            -stage ${SLANG_STAGE}
+            -I ${PROJECT_SOURCE_DIR}/shaders
+            -o ${SPIRV}
+        DEPENDS ${SLANG} ${PROJECT_SOURCE_DIR}/shaders/common.slang)
+    list(APPEND SPIRV_BINARY_FILES ${SPIRV})
+endforeach()
+
+# --- Remaining GLSL sources (background-compute experiments still in GLSL).
 file(GLOB_RECURSE GLSL_SOURCE_FILES
     "${PROJECT_SOURCE_DIR}/shaders/*.frag"
     "${PROJECT_SOURCE_DIR}/shaders/*.vert"
@@ -30,10 +72,9 @@ file(GLOB_RECURSE GLSL_SOURCE_FILES
     )
 
 foreach(GLSL ${GLSL_SOURCE_FILES})
-  message(STATUS "BUILDING SHADER")
   get_filename_component(FILE_NAME ${GLSL} NAME)
   set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${FILE_NAME}.spv")
-  message(STATUS ${GLSL})
+  message(STATUS "GLSL: ${FILE_NAME}")
   add_custom_command(
     OUTPUT ${SPIRV}
     COMMAND ${GLSL_VALIDATOR} -V ${GLSL} -o ${SPIRV}
@@ -42,6 +83,6 @@ foreach(GLSL ${GLSL_SOURCE_FILES})
 endforeach(GLSL)
 
 add_custom_target(
-    Shaders 
+    Shaders
     DEPENDS ${SPIRV_BINARY_FILES}
     )

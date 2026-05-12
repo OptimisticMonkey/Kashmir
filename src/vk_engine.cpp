@@ -836,12 +836,21 @@ void VulkanEngine::init_vulkan()
     features12.bufferDeviceAddress = true;
     features12.descriptorIndexing = true;
 
+    // vulkan 1.1 features — `shaderDrawParameters` is needed because Slang
+    // emits the SPIR-V DrawParameters capability on every vertex shader
+    // (it backs SV_VertexID/SV_InstanceID with the base-vertex/instance
+    // offset). glslang doesn't emit it unless the shader uses gl_DrawID etc.,
+    // which is why the GLSL build worked without this.
+    VkPhysicalDeviceVulkan11Features features11{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+    features11.shaderDrawParameters = true;
+
     // use vkbootstrap to select a gpu.
     // We want a gpu that can write to the SDL surface and supports vulkan 1.3 with the correct features
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
     vkb::PhysicalDevice physicalDevice = selector.set_minimum_version(1, 3)
                                              .set_required_features_13(features)
                                              .set_required_features_12(features12)
+                                             .set_required_features_11(features11)
                                              .set_surface(_surface)
                                              .select()
                                              .value();
