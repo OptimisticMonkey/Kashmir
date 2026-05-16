@@ -68,6 +68,7 @@ void PipelineBuilder::clear()
     _renderInfo = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
 
     _shaderStages.clear();
+    _isMeshPipeline = false;
 }
 
 VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
@@ -108,8 +109,9 @@ VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
 
     pipelineInfo.stageCount = (uint32_t)_shaderStages.size();
     pipelineInfo.pStages = _shaderStages.data();
-    pipelineInfo.pVertexInputState = &_vertexInputInfo;
-    pipelineInfo.pInputAssemblyState = &_inputAssembly;
+    // Mesh-shader pipelines don't consume vertex-input / input-assembly state.
+    pipelineInfo.pVertexInputState = _isMeshPipeline ? nullptr : &_vertexInputInfo;
+    pipelineInfo.pInputAssemblyState = _isMeshPipeline ? nullptr : &_inputAssembly;
     pipelineInfo.pViewportState = &viewportState;
     pipelineInfo.pRasterizationState = &_rasterizer;
     pipelineInfo.pMultisampleState = &_multisampling;
@@ -146,11 +148,31 @@ VkPipeline PipelineBuilder::build_pipeline(VkDevice device)
 void PipelineBuilder::set_shaders(VkShaderModule vertexShader, VkShaderModule fragmentShader)
 {
     _shaderStages.clear();
+    _isMeshPipeline = false;
 
     _shaderStages.push_back(
         vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_VERTEX_BIT, vertexShader));
 
     // Allow depth-only pipelines (shadow pass) to skip the fragment stage.
+    if (fragmentShader != VK_NULL_HANDLE)
+    {
+        _shaderStages.push_back(
+            vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_FRAGMENT_BIT, fragmentShader));
+    }
+}
+
+void PipelineBuilder::set_mesh_shaders(VkShaderModule taskShader, VkShaderModule meshShader, VkShaderModule fragmentShader)
+{
+    _shaderStages.clear();
+    _isMeshPipeline = true;
+
+    if (taskShader != VK_NULL_HANDLE)
+    {
+        _shaderStages.push_back(
+            vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_TASK_BIT_EXT, taskShader));
+    }
+    _shaderStages.push_back(
+        vkinit::pipeline_shader_stage_create_info(VK_SHADER_STAGE_MESH_BIT_EXT, meshShader));
     if (fragmentShader != VK_NULL_HANDLE)
     {
         _shaderStages.push_back(

@@ -34,9 +34,9 @@ foreach(SLANG ${SLANG_SOURCE_FILES})
     if(FILE_NAME STREQUAL "common.slang")
         continue()
     endif()
-    string(REGEX MATCH "\\.(vert|frag|comp)\\.slang$" STAGE_MATCH ${FILE_NAME})
+    string(REGEX MATCH "\\.(vert|frag|comp|mesh|task)\\.slang$" STAGE_MATCH ${FILE_NAME})
     if(NOT STAGE_MATCH)
-        message(FATAL_ERROR "Slang file ${FILE_NAME} must end in .vert.slang, .frag.slang, or .comp.slang")
+        message(FATAL_ERROR "Slang file ${FILE_NAME} must end in .vert.slang, .frag.slang, .comp.slang, .mesh.slang, or .task.slang")
     endif()
     set(STAGE_FLAG ${CMAKE_MATCH_1})
     if(STAGE_FLAG STREQUAL "vert")
@@ -45,14 +45,25 @@ foreach(SLANG ${SLANG_SOURCE_FILES})
         set(SLANG_STAGE "fragment")
     elseif(STAGE_FLAG STREQUAL "comp")
         set(SLANG_STAGE "compute")
+    elseif(STAGE_FLAG STREQUAL "mesh")
+        set(SLANG_STAGE "mesh")
+    elseif(STAGE_FLAG STREQUAL "task")
+        # slangc names the task stage "amplification" (DXR/DX12 terminology).
+        set(SLANG_STAGE "amplification")
+    endif()
+    # Mesh / task stages need SPIR-V 1.4 minimum (SPV_EXT_mesh_shader); bump to 1.6 for safety.
+    if(STAGE_FLAG STREQUAL "mesh" OR STAGE_FLAG STREQUAL "task")
+        set(SLANG_PROFILE "spirv_1_6")
+    else()
+        set(SLANG_PROFILE "spirv_1_5")
     endif()
     string(REGEX REPLACE "\\.slang$" ".spv" SPV_NAME ${FILE_NAME})
     set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${SPV_NAME}")
-    message(STATUS "Slang: ${FILE_NAME} -> ${SPV_NAME}")
+    message(STATUS "Slang: ${FILE_NAME} -> ${SPV_NAME} (stage=${SLANG_STAGE}, profile=${SLANG_PROFILE})")
     add_custom_command(
         OUTPUT ${SPIRV}
         COMMAND ${SLANGC} ${SLANG}
-            -profile spirv_1_5
+            -profile ${SLANG_PROFILE}
             -target spirv
             -emit-spirv-directly
             -fvk-use-entrypoint-name
