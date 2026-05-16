@@ -56,3 +56,11 @@ target_sources(imgui PRIVATE
 target_link_libraries(imgui PUBLIC Vulkan::Vulkan SDL3::SDL3)
 
 target_include_directories(stb_image INTERFACE stb_image)
+
+# meshoptimizer — built from third_party/meshoptimizer/src/*.cpp.
+# Added as a git submodule (third_party/meshoptimizer). Used for meshlet
+# generation on the mesh-shader rendering path.
+add_library(meshoptimizer STATIC)
+file(GLOB MESHOPT_SRC meshoptimizer/src/*.cpp)
+target_sources(meshoptimizer PRIVATE ${MESHOPT_SRC})
+target_include_directories(meshoptimizer PUBLIC meshoptimizer/src)

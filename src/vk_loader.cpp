@@ -210,6 +210,7 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
             }
         }
         newmesh.meshBuffers = engine->uploadMesh(indices, vertices);
+        engine->InitClusters(newmesh, vertices, indices);
 
         meshes.emplace_back(std::make_shared<MeshAsset>(std::move(newmesh)));
     }
@@ -591,6 +592,11 @@ void LoadedGLTF::clearAll()
         creator->destroy_buffer(v->meshBuffers.indexBuffer);
         creator->destroy_buffer(v->meshBuffers.vertexBuffer);
         creator->destroy_buffer(v->meshBuffers.instanceTransformBuffer);
+        if (v->meshBuffers.meshletCount > 0) {
+            creator->destroy_buffer(v->meshBuffers.meshletBuffer);
+            creator->destroy_buffer(v->meshBuffers.meshletVerticesBuffer);
+            creator->destroy_buffer(v->meshBuffers.meshletTrianglesBuffer);
+        }
     }
 
     for (auto& [k, v] : images) {

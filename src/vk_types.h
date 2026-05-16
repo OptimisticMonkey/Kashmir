@@ -95,6 +95,16 @@ struct InstanceTransform {
 	glm::mat4 transform;
 };
 
+// One meshlet as consumed by the mesh shader. Layout matches the Slang
+// `Meshlet` struct in shaders/mesh.mesh.slang (4 x uint32 = 16 bytes).
+// Triangle offsets index a uint32 buffer where each entry packs one
+// triangle's three byte indices into the low 24 bits.
+struct GpuMeshlet {
+    uint32_t vertexOffset;
+    uint32_t triangleOffset;
+    uint32_t vertexCount;
+    uint32_t triangleCount;
+};
 
 // holds the resources needed for a mesh
 struct GPUMeshBuffers {
@@ -105,6 +115,15 @@ struct GPUMeshBuffers {
     AllocatedBuffer instanceTransformBuffer;
     VkDeviceAddress instanceTransformBufferAddress;
 
+    // Mesh-shader path. Populated by VulkanEngine::InitClusters; zero if
+    // meshlets have not been built for this mesh.
+    AllocatedBuffer meshletBuffer;
+    AllocatedBuffer meshletVerticesBuffer;
+    AllocatedBuffer meshletTrianglesBuffer;
+    VkDeviceAddress meshletBufferAddress{ 0 };
+    VkDeviceAddress meshletVerticesAddress{ 0 };
+    VkDeviceAddress meshletTrianglesAddress{ 0 };
+    uint32_t        meshletCount{ 0 };
 };
 
 // push constants for our mesh object draws
@@ -113,6 +132,19 @@ struct GPUDrawPushConstants {
     VkDeviceAddress vertexBuffer;
     VkDeviceAddress instanceTransformBuffer;
 };
+
+// Push constants for the mesh-shader rendering path.
+struct GPUMeshShaderPushConstants {
+    glm::mat4       worldMatrix;             // 64
+    VkDeviceAddress vertexBuffer;            //  8
+    VkDeviceAddress instanceTransformBuffer; //  8
+    VkDeviceAddress meshletBuffer;           //  8
+    VkDeviceAddress meshletVertices;         //  8
+    VkDeviceAddress meshletTriangles;        //  8
+    uint32_t        meshletCount;            //  4
+    uint32_t        instanceCount;           //  4  => 112 bytes (fits in the 128-byte guarantee)
+};
+static_assert(sizeof(GPUMeshShaderPushConstants) <= 128, "Push constant size exceeds typical maxPushConstantsSize");
 
 enum class MaterialPass :uint8_t {
     MainColor,

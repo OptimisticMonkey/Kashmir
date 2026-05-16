@@ -23,6 +23,8 @@
 #include <unordered_set>
 #include <thread>
 
+#include <meshoptimizer.h>
+
 VulkanEngine* loadedEngine = nullptr;
 
 VulkanEngine& VulkanEngine::Get()
@@ -411,6 +413,41 @@ void VulkanEngine::init_shadow_pipeline()
     _shadowPipeline = pb.build_pipeline(_device);
 
     vkDestroyShaderModule(_device, shadowVert, nullptr);
+
+    // --- Mesh-shader variant of the shadow caster pipeline. Shares the
+    // GPUMeshShaderPushConstants layout with the main mesh pipeline so we can
+    // forward the same data from draw_shadow.
+    VkShaderModule shadowMesh;
+    if (!vkutil::load_shader_module("../../shaders/shadow.mesh.spv", _device, &shadowMesh))
+    {
+        fmt::println("Error loading shadow.mesh.spv for shadow pipeline");
+    }
+
+    VkPushConstantRange meshPushRange{};
+    meshPushRange.offset = 0;
+    meshPushRange.size = sizeof(GPUMeshShaderPushConstants);
+    meshPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
+
+    VkPipelineLayoutCreateInfo meshLayoutInfo = vkinit::pipeline_layout_create_info();
+    meshLayoutInfo.setLayoutCount = 1;
+    meshLayoutInfo.pSetLayouts = setLayouts;
+    meshLayoutInfo.pushConstantRangeCount = 1;
+    meshLayoutInfo.pPushConstantRanges = &meshPushRange;
+    VK_CHECK(vkCreatePipelineLayout(_device, &meshLayoutInfo, nullptr, &_shadowMeshPipelineLayout));
+
+    PipelineBuilder mpb;
+    mpb.set_mesh_shaders(VK_NULL_HANDLE, shadowMesh, shadowFrag);
+    mpb.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    mpb.set_cull_mode(VK_CULL_MODE_FRONT_BIT, VK_FRONT_FACE_CLOCKWISE);
+    mpb.set_multisampling_none();
+    mpb.disable_blending();
+    mpb.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    mpb.set_depth_format(_shadowImage.imageFormat);
+    mpb._pipelineLayout = _shadowMeshPipelineLayout;
+
+    _shadowMeshPipeline = mpb.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, shadowMesh, nullptr);
     vkDestroyShaderModule(_device, shadowFrag, nullptr);
 
     _mainDeletionQueue.push_function(
@@ -418,6 +455,8 @@ void VulkanEngine::init_shadow_pipeline()
         {
             vkDestroyPipelineLayout(_device, _shadowPipelineLayout, nullptr);
             vkDestroyPipeline(_device, _shadowPipeline, nullptr);
+            vkDestroyPipelineLayout(_device, _shadowMeshPipelineLayout, nullptr);
+            vkDestroyPipeline(_device, _shadowMeshPipeline, nullptr);
         });
 }
 
@@ -746,7 +785,8 @@ void VulkanEngine::init_descriptors()
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
         _gpuSceneDataDescriptorLayout =
-            builder.build(_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+            builder.build(_device,
+                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
 
     // make sure both the descriptor allocator and the new layout get cleaned up properly
@@ -844,6 +884,12 @@ void VulkanEngine::init_vulkan()
     VkPhysicalDeviceVulkan11Features features11{ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
     features11.shaderDrawParameters = true;
 
+    // VK_EXT_mesh_shader features — feeds the optional mesh-shader rendering path.
+    VkPhysicalDeviceMeshShaderFeaturesEXT meshShaderFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };
+    meshShaderFeatures.meshShader = VK_TRUE;
+    meshShaderFeatures.taskShader = VK_TRUE;
+
     // use vkbootstrap to select a gpu.
     // We want a gpu that can write to the SDL surface and supports vulkan 1.3 with the correct features
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
@@ -851,6 +897,8 @@ void VulkanEngine::init_vulkan()
                                              .set_required_features_13(features)
                                              .set_required_features_12(features12)
                                              .set_required_features_11(features11)
+                                             .add_required_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME)
+                                             .add_required_extension_features(meshShaderFeatures)
                                              .set_surface(_surface)
                                              .select()
                                              .value();
@@ -866,6 +914,10 @@ void VulkanEngine::init_vulkan()
 
     _graphicsQueue = vkbDevice.get_queue(vkb::QueueType::graphics).value();
     _graphicsQueueFamily = vkbDevice.get_queue_index(vkb::QueueType::graphics).value();
+
+    pfnCmdDrawMeshTasksEXT = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+        vkGetDeviceProcAddr(_device, "vkCmdDrawMeshTasksEXT"));
+    assert(pfnCmdDrawMeshTasksEXT && "vkCmdDrawMeshTasksEXT not available");
 
     // initialize the memory allocator
     VmaAllocatorCreateInfo allocatorInfo = {};
@@ -1152,6 +1204,12 @@ void VulkanEngine::cleanup()
             destroy_buffer(mesh->meshBuffers.indexBuffer);
             destroy_buffer(mesh->meshBuffers.vertexBuffer);
             destroy_buffer(mesh->meshBuffers.instanceTransformBuffer);
+            if (mesh->meshBuffers.meshletCount > 0)
+            {
+                destroy_buffer(mesh->meshBuffers.meshletBuffer);
+                destroy_buffer(mesh->meshBuffers.meshletVerticesBuffer);
+                destroy_buffer(mesh->meshBuffers.meshletTrianglesBuffer);
+            }
         }
         testMeshes.clear();
 
@@ -1525,35 +1583,67 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
 
     for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces)
     {
+        // Mesh-shader path applies only to Suzanne's opaque pipeline; ground &
+        // transparent surfaces always take the vertex path.
+        const bool useMeshShaders = _useMeshShaders
+                                 && draw.material->pipeline == &metalRoughMaterial.opaquePipeline
+                                 && draw.meshletCount > 0
+                                 && draw.instanceCount > 0;
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->pipeline);
+        MaterialPipeline* pp = useMeshShaders
+                                 ? &metalRoughMaterial.opaqueMeshPipeline
+                                 : draw.material->pipeline;
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipeline);
         vkCmdBindDescriptorSets(
-            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.material->pipeline->layout, 0, 1, &globalDescriptor, 0, nullptr);
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->layout, 0, 1, &globalDescriptor, 0, nullptr);
         vkCmdBindDescriptorSets(cmd,
                                 VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                draw.material->pipeline->layout,
+                                pp->layout,
                                 1,
                                 1,
                                 &draw.material->materialSet,
                                 0,
                                 nullptr);
 
-        vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        if (useMeshShaders)
+        {
+            GPUMeshShaderPushConstants pc{};
+            pc.worldMatrix = draw.transform;
+            pc.vertexBuffer = draw.vertexBufferAddress;
+            pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+            pc.meshletBuffer = draw.meshletBufferAddress;
+            pc.meshletVertices = draw.meshletVerticesAddress;
+            pc.meshletTriangles = draw.meshletTrianglesAddress;
+            pc.meshletCount = draw.meshletCount;
+            pc.instanceCount = draw.instanceCount;
 
-        GPUDrawPushConstants pushConstants;
-        pushConstants.vertexBuffer = draw.vertexBufferAddress;
-        pushConstants.instanceTransformBuffer = draw.instanceTransformBufferAddress;
-        pushConstants.worldMatrix = draw.transform;
-        vkCmdPushConstants(cmd,
-                           draw.material->pipeline->layout,
-                           VK_SHADER_STAGE_VERTEX_BIT,
-                           0,
-                           sizeof(GPUDrawPushConstants),
-                           &pushConstants);
+            vkCmdPushConstants(cmd,
+                               pp->layout,
+                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT,
+                               0,
+                               sizeof(pc),
+                               &pc);
 
-        vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+            pfnCmdDrawMeshTasksEXT(cmd, draw.meshletCount, draw.instanceCount, 1);
+        }
+        else
+        {
+            vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        // vkCmdDrawIndexed(cmd, draw.indexCount, 100, draw.firstIndex, 0, 0);
+            GPUDrawPushConstants pushConstants;
+            pushConstants.vertexBuffer = draw.vertexBufferAddress;
+            pushConstants.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+            pushConstants.worldMatrix = draw.transform;
+            vkCmdPushConstants(cmd,
+                               pp->layout,
+                               VK_SHADER_STAGE_VERTEX_BIT,
+                               0,
+                               sizeof(GPUDrawPushConstants),
+                               &pushConstants);
+
+            vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+        }
     }
 
     vkCmdEndRendering(cmd);
@@ -1648,9 +1738,13 @@ void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
     scissor.extent = _shadowExtent;
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipeline);
+    const bool useMS = _useMeshShaders;
+    VkPipeline       activePipeline = useMS ? _shadowMeshPipeline       : _shadowPipeline;
+    VkPipelineLayout activeLayout   = useMS ? _shadowMeshPipelineLayout : _shadowPipelineLayout;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
     vkCmdBindDescriptorSets(
-        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _shadowPipelineLayout, 0, 1, &shadowSceneSet, 0, nullptr);
+        cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activeLayout, 0, 1, &shadowSceneSet, 0, nullptr);
 
     // Skip ground (flat plane, no meaningful shadow contribution + has no instance
     // transform buffer for the shadow.vert to read). Same filter as update_transform.
@@ -1662,16 +1756,38 @@ void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
         if (draw.instanceTransformBufferAddress == groundAddr)
             continue;
 
-        vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        if (useMS && draw.meshletCount > 0 && draw.instanceCount > 0)
+        {
+            GPUMeshShaderPushConstants pc{};
+            pc.worldMatrix = draw.transform;
+            pc.vertexBuffer = draw.vertexBufferAddress;
+            pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+            pc.meshletBuffer = draw.meshletBufferAddress;
+            pc.meshletVertices = draw.meshletVerticesAddress;
+            pc.meshletTriangles = draw.meshletTrianglesAddress;
+            pc.meshletCount = draw.meshletCount;
+            pc.instanceCount = draw.instanceCount;
+            vkCmdPushConstants(cmd,
+                               activeLayout,
+                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT,
+                               0,
+                               sizeof(pc),
+                               &pc);
+            pfnCmdDrawMeshTasksEXT(cmd, draw.meshletCount, draw.instanceCount, 1);
+        }
+        else
+        {
+            vkCmdBindIndexBuffer(cmd, draw.indexBuffer, 0, VK_INDEX_TYPE_UINT32);
 
-        GPUDrawPushConstants pc;
-        pc.worldMatrix = draw.transform;
-        pc.vertexBuffer = draw.vertexBufferAddress;
-        pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
-        vkCmdPushConstants(
-            cmd, _shadowPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+            GPUDrawPushConstants pc;
+            pc.worldMatrix = draw.transform;
+            pc.vertexBuffer = draw.vertexBufferAddress;
+            pc.instanceTransformBuffer = draw.instanceTransformBufferAddress;
+            vkCmdPushConstants(
+                cmd, activeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
 
-        vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+            vkCmdDrawIndexed(cmd, draw.indexCount, draw.instanceCount, draw.firstIndex, 0, 0);
+        }
     }
 
     vkCmdEndRendering(cmd);
@@ -1718,9 +1834,11 @@ void VulkanEngine::update_transform(VkCommandBuffer cmd)
     VkMemoryBarrier barrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    // The instance-transform buffer is consumed by either the vertex shader
+    // (traditional path) or the mesh shader (mesh-shader path). Include both.
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
                          0,
                          1,
                          &barrier,
@@ -1815,6 +1933,9 @@ void VulkanEngine::run()
             ImGui::InputFloat4("data2", (float*)&selected.data.data2);
             ImGui::InputFloat4("data3", (float*)&selected.data.data3);
             ImGui::InputFloat4("data4", (float*)&selected.data.data4);
+
+            ImGui::Separator();
+            ImGui::Checkbox("Mesh shaders (Suzanne)", &_useMeshShaders);
         }
         ImGui::End();
 
@@ -1980,6 +2101,141 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
     destroy_buffer(staging);
 
     return newSurface;
+}
+
+void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std::span<uint32_t> indices)
+{
+    constexpr size_t kMaxVerts = 64;
+    constexpr size_t kMaxTris  = 124;
+    constexpr float  kConeWeight = 0.0f; // Phase 2: bump for backface-cone culling in the task shader.
+
+    if (vertices.empty() || indices.empty())
+    {
+        return;
+    }
+
+    const size_t bound = meshopt_buildMeshletsBound(indices.size(), kMaxVerts, kMaxTris);
+    std::vector<meshopt_Meshlet> rawMeshlets(bound);
+    std::vector<uint32_t>        meshletVertices(bound * kMaxVerts);
+    std::vector<uint8_t>         meshletTrianglesU8(bound * kMaxTris * 3);
+
+    const size_t meshletCount = meshopt_buildMeshlets(
+        rawMeshlets.data(),
+        meshletVertices.data(),
+        meshletTrianglesU8.data(),
+        indices.data(),
+        indices.size(),
+        &vertices[0].position.x,
+        vertices.size(),
+        sizeof(Vertex),
+        kMaxVerts,
+        kMaxTris,
+        kConeWeight);
+
+    if (meshletCount == 0)
+    {
+        return;
+    }
+
+    // Re-pack the byte triangle stream as one uint32 per triangle (low 24 bits used).
+    // This avoids 8-bit storage requirements on the GPU and lets the shader unpack with
+    // simple bit shifts.
+    std::vector<uint32_t>  packedTriangles;
+    std::vector<GpuMeshlet> gpuMeshlets(meshletCount);
+    packedTriangles.reserve(meshletCount * kMaxTris);
+
+    for (size_t i = 0; i < meshletCount; ++i)
+    {
+        const meshopt_Meshlet& m = rawMeshlets[i];
+        gpuMeshlets[i] = {
+            m.vertex_offset,
+            static_cast<uint32_t>(packedTriangles.size()),
+            m.vertex_count,
+            m.triangle_count
+        };
+
+        const uint8_t* src = meshletTrianglesU8.data() + m.triangle_offset;
+        for (uint32_t t = 0; t < m.triangle_count; ++t)
+        {
+            const uint32_t a = src[3 * t + 0];
+            const uint32_t b = src[3 * t + 1];
+            const uint32_t c = src[3 * t + 2];
+            packedTriangles.push_back(a | (b << 8) | (c << 16));
+        }
+    }
+
+    // Trim the vertex-index array to what was actually used.
+    const meshopt_Meshlet& last = rawMeshlets[meshletCount - 1];
+    meshletVertices.resize(last.vertex_offset + last.vertex_count);
+
+    const size_t meshletBufferSize   = gpuMeshlets.size()    * sizeof(GpuMeshlet);
+    const size_t mverticesBufferSize = meshletVertices.size() * sizeof(uint32_t);
+    const size_t trianglesBufferSize = packedTriangles.size() * sizeof(uint32_t);
+
+    const VkBufferUsageFlags storageUsage =
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    mesh.meshBuffers.meshletBuffer =
+        create_buffer(meshletBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "Meshlets");
+    mesh.meshBuffers.meshletVerticesBuffer =
+        create_buffer(mverticesBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "MeshletVertices");
+    mesh.meshBuffers.meshletTrianglesBuffer =
+        create_buffer(trianglesBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "MeshletTriangles");
+
+    {
+        VkBufferDeviceAddressInfo info{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                        .buffer = mesh.meshBuffers.meshletBuffer.buffer };
+        mesh.meshBuffers.meshletBufferAddress = vkGetBufferDeviceAddress(_device, &info);
+    }
+    {
+        VkBufferDeviceAddressInfo info{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                        .buffer = mesh.meshBuffers.meshletVerticesBuffer.buffer };
+        mesh.meshBuffers.meshletVerticesAddress = vkGetBufferDeviceAddress(_device, &info);
+    }
+    {
+        VkBufferDeviceAddressInfo info{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                        .buffer = mesh.meshBuffers.meshletTrianglesBuffer.buffer };
+        mesh.meshBuffers.meshletTrianglesAddress = vkGetBufferDeviceAddress(_device, &info);
+    }
+
+    AllocatedBuffer staging = create_buffer(meshletBufferSize + mverticesBufferSize + trianglesBufferSize,
+                                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                            VMA_MEMORY_USAGE_CPU_ONLY,
+                                            "MeshletStaging");
+    void* data = staging.allocation->GetMappedData();
+    memcpy(data, gpuMeshlets.data(), meshletBufferSize);
+    memcpy(static_cast<char*>(data) + meshletBufferSize, meshletVertices.data(), mverticesBufferSize);
+    memcpy(static_cast<char*>(data) + meshletBufferSize + mverticesBufferSize, packedTriangles.data(), trianglesBufferSize);
+
+    immediate_submit(
+        [&](VkCommandBuffer cmd)
+        {
+            VkBufferCopy copy{};
+            copy.srcOffset = 0;
+            copy.dstOffset = 0;
+            copy.size = meshletBufferSize;
+            vkCmdCopyBuffer(cmd, staging.buffer, mesh.meshBuffers.meshletBuffer.buffer, 1, &copy);
+
+            copy.srcOffset = meshletBufferSize;
+            copy.size = mverticesBufferSize;
+            vkCmdCopyBuffer(cmd, staging.buffer, mesh.meshBuffers.meshletVerticesBuffer.buffer, 1, &copy);
+
+            copy.srcOffset = meshletBufferSize + mverticesBufferSize;
+            copy.size = trianglesBufferSize;
+            vkCmdCopyBuffer(cmd, staging.buffer, mesh.meshBuffers.meshletTrianglesBuffer.buffer, 1, &copy);
+        });
+
+    destroy_buffer(staging);
+
+    mesh.meshBuffers.meshletCount = static_cast<uint32_t>(meshletCount);
+
+    fmt::println("InitClusters: mesh '{}' -> {} meshlets ({} verts, {} packed tris)",
+                 mesh.name,
+                 meshletCount,
+                 meshletVertices.size(),
+                 packedTriangles.size());
 }
 
 void VulkanEngine::init_mesh_pipeline()
@@ -2294,7 +2550,8 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     layoutBuilder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
     layoutBuilder.add_binding(2, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
 
-    materialLayout = layoutBuilder.build(engine->_device, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+    materialLayout = layoutBuilder.build(engine->_device,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT);
 
     VkDescriptorSetLayout layouts[] = { engine->_gpuSceneDataDescriptorLayout, materialLayout };
 
@@ -2338,8 +2595,46 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
     transparentPipeline.pipeline = pipelineBuilder.build_pipeline(engine->_device);
 
-    vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
     vkDestroyShaderModule(engine->_device, meshVertexShader, nullptr);
+
+    // --- Mesh-shader variant of the opaque pipeline.
+    VkShaderModule meshMeshShader;
+    if (!vkutil::load_shader_module("../../shaders/mesh.mesh.spv", engine->_device, &meshMeshShader))
+    {
+        fmt::println("Error loading mesh.mesh.spv");
+    }
+
+    VkPushConstantRange meshShaderPushRange{};
+    meshShaderPushRange.offset = 0;
+    meshShaderPushRange.size = sizeof(GPUMeshShaderPushConstants);
+    // Stage flags include TASK bit for Phase-2 readiness — the task shader will share this layout.
+    meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
+
+    VkPipelineLayoutCreateInfo meshShaderLayoutInfo = vkinit::pipeline_layout_create_info();
+    meshShaderLayoutInfo.setLayoutCount = 2;
+    meshShaderLayoutInfo.pSetLayouts = layouts;
+    meshShaderLayoutInfo.pPushConstantRanges = &meshShaderPushRange;
+    meshShaderLayoutInfo.pushConstantRangeCount = 1;
+
+    VkPipelineLayout meshShaderLayout;
+    VK_CHECK(vkCreatePipelineLayout(engine->_device, &meshShaderLayoutInfo, nullptr, &meshShaderLayout));
+    opaqueMeshPipeline.layout = meshShaderLayout;
+
+    PipelineBuilder meshShaderBuilder;
+    meshShaderBuilder.set_mesh_shaders(VK_NULL_HANDLE, meshMeshShader, meshFragShader);
+    meshShaderBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    meshShaderBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    meshShaderBuilder.set_multisampling_none();
+    meshShaderBuilder.disable_blending();
+    meshShaderBuilder.enable_depthtest(true, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    meshShaderBuilder.set_color_attachment_format(engine->_drawImage.imageFormat);
+    meshShaderBuilder.set_depth_format(engine->_depthImage.imageFormat);
+    meshShaderBuilder._pipelineLayout = meshShaderLayout;
+
+    opaqueMeshPipeline.pipeline = meshShaderBuilder.build_pipeline(engine->_device);
+
+    vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
+    vkDestroyShaderModule(engine->_device, meshMeshShader, nullptr);
 }
 
 MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device,
@@ -2406,6 +2701,12 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCo
         def.vertexBufferAddress = mesh->meshBuffers.vertexBufferAddress;
         def.instanceTransformBufferAddress = mesh->meshBuffers.instanceTransformBufferAddress;
 
+        // Mesh-shader path: forward the (optional) meshlet buffer addresses.
+        def.meshletBufferAddress = mesh->meshBuffers.meshletBufferAddress;
+        def.meshletVerticesAddress = mesh->meshBuffers.meshletVerticesAddress;
+        def.meshletTrianglesAddress = mesh->meshBuffers.meshletTrianglesAddress;
+        def.meshletCount = mesh->meshBuffers.meshletCount;
+
         ctx.OpaqueSurfaces.push_back(def);
     }
 
@@ -2420,4 +2721,10 @@ void GLTFMetallic_Roughness::clear_resources(VkDevice device)
 
     vkDestroyPipeline(device, transparentPipeline.pipeline, nullptr);
     vkDestroyPipeline(device, opaquePipeline.pipeline, nullptr);
+
+    if (opaqueMeshPipeline.pipeline != VK_NULL_HANDLE)
+    {
+        vkDestroyPipeline(device, opaqueMeshPipeline.pipeline, nullptr);
+        vkDestroyPipelineLayout(device, opaqueMeshPipeline.layout, nullptr);
+    }
 }

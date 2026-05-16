@@ -11,6 +11,10 @@
 struct GLTFMetallic_Roughness {
 	MaterialPipeline opaquePipeline;
 	MaterialPipeline transparentPipeline;
+	// Optional mesh-shader variant of opaquePipeline. Bound in draw_geometry
+	// when VulkanEngine::_useMeshShaders is true. Has its own layout because
+	// the push-constant range differs (GPUMeshShaderPushConstants vs GPUDrawPushConstants).
+	MaterialPipeline opaqueMeshPipeline;
 
 	VkDescriptorSetLayout materialLayout;
 
@@ -50,6 +54,12 @@ struct RenderObject {
 	glm::mat4 transform;
 	VkDeviceAddress vertexBufferAddress;
 	VkDeviceAddress instanceTransformBufferAddress;
+
+	// Mesh-shader path. Zero when the mesh wasn't clustered (e.g. ground).
+	VkDeviceAddress meshletBufferAddress{ 0 };
+	VkDeviceAddress meshletVerticesAddress{ 0 };
+	VkDeviceAddress meshletTrianglesAddress{ 0 };
+	uint32_t        meshletCount{ 0 };
 };
 
 
@@ -194,6 +204,9 @@ public:
 	VkExtent2D _shadowExtent{ 2048, 2048 };
 	VkPipeline _shadowPipeline{ VK_NULL_HANDLE };
 	VkPipelineLayout _shadowPipelineLayout{ VK_NULL_HANDLE };
+	// Mesh-shader variant — bound when _useMeshShaders is true.
+	VkPipeline _shadowMeshPipeline{ VK_NULL_HANDLE };
+	VkPipelineLayout _shadowMeshPipelineLayout{ VK_NULL_HANDLE };
 
 
 	bool _isInitialized{ false };
@@ -247,6 +260,15 @@ public:
 	std::vector<ComputeEffect> backgroundEffects;
 	int currentBackgroundEffect{ 0 };
 	GPUMeshBuffers uploadMesh(std::span<uint32_t> indices, std::span<Vertex> vertices);
+	// Builds meshlet clusters with meshoptimizer and uploads the GPU buffers
+	// (meshlets, vertex indices, packed triangle indices) into mesh.meshBuffers.
+	void InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std::span<uint32_t> indices);
+
+	// Runtime toggle: when true, draw_geometry routes Suzanne's opaque surfaces
+	// through opaqueMeshPipeline + vkCmdDrawMeshTasksEXT instead of vkCmdDrawIndexed.
+	bool _useMeshShaders{ false };
+	// Loaded from vkGetDeviceProcAddr in init_vulkan.
+	PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasksEXT{ nullptr };
 
 	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* debugName);
 	void destroy_buffer(const AllocatedBuffer& buffer);

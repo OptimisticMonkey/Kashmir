@@ -20,6 +20,9 @@ public:
     VkPipelineDepthStencilStateCreateInfo _depthStencil;
     VkPipelineRenderingCreateInfo _renderInfo;
     VkFormat _colorAttachmentformat;
+    // True after set_mesh_shaders(); drops the (irrelevant) vertex-input and
+    // input-assembly state from the pipeline create info.
+    bool _isMeshPipeline{ false };
 
     PipelineBuilder() { clear(); }
 
@@ -37,6 +40,8 @@ public:
     void set_polygon_mode(VkPolygonMode mode);
     void set_input_topology(VkPrimitiveTopology topology);
     void set_shaders(VkShaderModule vertexShader, VkShaderModule fragmentShader);
+    // Mesh-shader pipeline: task is optional (VK_NULL_HANDLE for Phase 1).
+    void set_mesh_shaders(VkShaderModule taskShader, VkShaderModule meshShader, VkShaderModule fragmentShader);
     void enable_blending_additive();
     void enable_blending_alphablend();
 };
