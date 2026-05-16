@@ -9,7 +9,14 @@
       "Bash(cmake --build build --config Debug)",
       "WebSearch",
       "Bash(cmake -S . -B build)",
-      "Bash(cmake --build build --config Debug --target Shaders)"
+      "Bash(cmake --build build --config Debug --target Shaders)",
+      "Bash(gh pr *)",
+      "Bash(git -C E:/VULKAN/Kashmir submodule status)",
+      "Bash(cmake -S E:/VULKAN/Kashmir/.claude/worktrees/upbeat-babbage-61e28e -B E:/VULKAN/Kashmir/.claude/worktrees/upbeat-babbage-61e28e/build)",
+      "Bash(git submodule *)",
+      "Bash(cmake --build E:/VULKAN/Kashmir/.claude/worktrees/upbeat-babbage-61e28e/build --config Debug)",
+      "Bash(cmake --build E:/VULKAN/Kashmir/.claude/worktrees/upbeat-babbage-61e28e/build --config Debug --target Shaders)",
+      "Bash(git add *)"
     ]
   }
 }

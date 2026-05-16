@@ -2,6 +2,10 @@
 // perspective. Shares the GPUMeshShaderPushConstants layout with mesh.mesh
 // so both passes emit pixel-equivalent positions (avoids shadow acne when
 // the main pass samples the shadow map).
+//
+// Shadow pass intentionally has no task shader: silhouettes that the camera
+// pass skips via cone-culling still need to cast shadows from the sun's
+// direction, so we dispatch one mesh workgroup per (meshlet, instance) here.
 
 import common;
 
@@ -13,6 +17,13 @@ struct Meshlet
     uint triangleCount;
 };
 
+struct MeshletBounds
+{
+    float4 centerRadius;
+    float4 coneApex;
+    float4 coneAxisCutoff;
+};
+
 struct PushConstants
 {
     float4x4           worldMatrix;
@@ -21,6 +32,7 @@ struct PushConstants
     Meshlet*           meshlets;
     uint*              meshletVertices;
     uint*              meshletTriangles;
+    MeshletBounds*     meshletBounds;
     uint               meshletCount;
     uint               instanceCount;
 };

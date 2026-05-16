@@ -596,6 +596,7 @@ void LoadedGLTF::clearAll()
             creator->destroy_buffer(v->meshBuffers.meshletBuffer);
             creator->destroy_buffer(v->meshBuffers.meshletVerticesBuffer);
             creator->destroy_buffer(v->meshBuffers.meshletTrianglesBuffer);
+            creator->destroy_buffer(v->meshBuffers.meshletBoundsBuffer);
         }
     }
 

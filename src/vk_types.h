@@ -106,6 +106,15 @@ struct GpuMeshlet {
     uint32_t triangleCount;
 };
 
+// Per-meshlet bounding sphere + normal cone, produced by
+// meshopt_computeMeshletBounds and consumed by the task shader. 48 bytes,
+// vec4-aligned. Slang counterpart: `MeshletBounds` in shaders/mesh.task.slang.
+struct GpuMeshletBounds {
+    glm::vec4 centerRadius;   // xyz = bounding-sphere center, w = radius
+    glm::vec4 coneApex;       // xyz = cone apex, w = padding
+    glm::vec4 coneAxisCutoff; // xyz = cone axis, w = cos(angle/2)
+};
+
 // holds the resources needed for a mesh
 struct GPUMeshBuffers {
 
@@ -120,9 +129,11 @@ struct GPUMeshBuffers {
     AllocatedBuffer meshletBuffer;
     AllocatedBuffer meshletVerticesBuffer;
     AllocatedBuffer meshletTrianglesBuffer;
+    AllocatedBuffer meshletBoundsBuffer;
     VkDeviceAddress meshletBufferAddress{ 0 };
     VkDeviceAddress meshletVerticesAddress{ 0 };
     VkDeviceAddress meshletTrianglesAddress{ 0 };
+    VkDeviceAddress meshletBoundsAddress{ 0 };
     uint32_t        meshletCount{ 0 };
 };
 
@@ -141,8 +152,9 @@ struct GPUMeshShaderPushConstants {
     VkDeviceAddress meshletBuffer;           //  8
     VkDeviceAddress meshletVertices;         //  8
     VkDeviceAddress meshletTriangles;        //  8
+    VkDeviceAddress meshletBounds;           //  8
     uint32_t        meshletCount;            //  4
-    uint32_t        instanceCount;           //  4  => 112 bytes (fits in the 128-byte guarantee)
+    uint32_t        instanceCount;           //  4  => 120 bytes (fits in the 128-byte guarantee)
 };
 static_assert(sizeof(GPUMeshShaderPushConstants) <= 128, "Push constant size exceeds typical maxPushConstantsSize");
 

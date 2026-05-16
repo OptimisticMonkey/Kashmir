@@ -59,6 +59,7 @@ struct RenderObject {
 	VkDeviceAddress meshletBufferAddress{ 0 };
 	VkDeviceAddress meshletVerticesAddress{ 0 };
 	VkDeviceAddress meshletTrianglesAddress{ 0 };
+	VkDeviceAddress meshletBoundsAddress{ 0 };
 	uint32_t        meshletCount{ 0 };
 };
 
@@ -234,6 +235,7 @@ public:
 	void update_transform(VkCommandBuffer cmd);
 	void DrawGround(const glm::mat4& topMatrix);
 	void draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView);
+	void draw_stats_overlay();
 	//run main loop
 	void run();
 

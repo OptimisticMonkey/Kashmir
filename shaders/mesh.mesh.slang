@@ -8,6 +8,13 @@ struct Meshlet
     uint triangleCount;
 };
 
+struct MeshletBounds
+{
+    float4 centerRadius;
+    float4 coneApex;
+    float4 coneAxisCutoff;
+};
+
 struct PushConstants
 {
     float4x4           worldMatrix;
@@ -16,6 +23,7 @@ struct PushConstants
     Meshlet*           meshlets;
     uint*              meshletVertices;
     uint*              meshletTriangles;
+    MeshletBounds*     meshletBounds;
     uint               meshletCount;
     uint               instanceCount;
 };
@@ -31,22 +39,31 @@ struct VSOut
     float4 shadowCoord : TEXCOORD2;
 };
 
-static const uint kMaxVerts = 64;
-static const uint kMaxTris  = 124;
+static const uint kMaxVerts  = 64;
+static const uint kMaxTris   = 124;
 static const uint kGroupSize = 32;
 
-// DEBUG STEP 5: + real normal rotation. shadowCoord still stubbed.
+// Mirrors the Payload in shaders/mesh.task.slang. The task shader broadcasts
+// instanceIdx and a packed list of survivor meshletIds[] to each launched
+// mesh workgroup; gid.x indexes into that survivor list.
+struct Payload
+{
+    uint instanceIdx;
+    uint meshletIds[kGroupSize];
+};
+
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(kGroupSize, 1, 1)]
 void main(
     uint3 gid : SV_GroupID,
     uint  tid : SV_GroupThreadID,
+    in payload Payload payload,
     out vertices VSOut verts[kMaxVerts],
     out indices  uint3 tris [kMaxTris])
 {
-    uint meshletIdx  = gid.x;
-    uint instanceIdx = gid.y;
+    uint meshletIdx  = payload.meshletIds[gid.x];
+    uint instanceIdx = payload.instanceIdx;
 
     Meshlet  m         = pc.meshlets[meshletIdx];
     float4x4 instXform = pc.instanceTransformBuffer[instanceIdx].transform;
