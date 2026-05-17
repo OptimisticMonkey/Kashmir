@@ -26,8 +26,24 @@ struct PushConstants
     MeshletBounds*     meshletBounds;
     uint               meshletCount;
     uint               instanceCount;
+    uint               debugFlags;       // bit0 = cluster color enabled
 };
 [[vk::push_constant]] PushConstants pc;
+
+// Hash a meshlet index into a deterministic RGB triple so cluster boundaries
+// are visible in the debug view. Same input → same color frame-to-frame.
+float3 hashMeshletColor(uint id)
+{
+    uint h = id;
+    h = (h ^ 61u) ^ (h >> 16);
+    h *= 9u;
+    h = h ^ (h >> 4);
+    h *= 0x27d4eb2du;
+    h = h ^ (h >> 15);
+    return float3((h        & 0xffu) / 255.0,
+                  ((h >>  8) & 0xffu) / 255.0,
+                  ((h >> 16) & 0xffu) / 255.0);
+}
 
 struct VSOut
 {
@@ -86,6 +102,10 @@ void main(
         o.uv          = float2(v.uv_x, v.uv_y);
         o.worldPos    = worldPos.xyz;
         o.shadowCoord = mul(sceneData.lightViewProj, worldPos);
+        if ((pc.debugFlags & 0x1u) != 0u)
+        {
+            o.color = hashMeshletColor(meshletIdx);
+        }
         verts[i] = o;
     }
 

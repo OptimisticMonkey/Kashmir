@@ -1619,10 +1619,13 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
             pc.meshletBounds = draw.meshletBoundsAddress;
             pc.meshletCount = draw.meshletCount;
             pc.instanceCount = draw.instanceCount;
+            pc.debugFlags = 0u;
+            if (_debugClusterColor) pc.debugFlags |= 0x1u;
+            if (_debugClusterLit)   pc.debugFlags |= 0x2u;
 
             vkCmdPushConstants(cmd,
                                pp->layout,
-                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT,
+                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0,
                                sizeof(pc),
                                &pc);
@@ -1967,6 +1970,8 @@ void VulkanEngine::run()
 
             ImGui::Separator();
             ImGui::Checkbox("Mesh shaders (Suzanne)", &_useMeshShaders);
+            ImGui::Checkbox("Debug cluster color", &_debugClusterColor);
+            ImGui::Checkbox("Lit cluster color", &_debugClusterLit);
         }
         ImGui::End();
 
@@ -2676,8 +2681,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VkPushConstantRange meshShaderPushRange{};
     meshShaderPushRange.offset = 0;
     meshShaderPushRange.size = sizeof(GPUMeshShaderPushConstants);
-    // Both task and mesh stages read the push constants.
-    meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
+    // Task and mesh stages read the buffer addresses; the fragment stage reads
+    // debugFlags for the cluster-color view mode.
+    meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
     VkPipelineLayoutCreateInfo meshShaderLayoutInfo = vkinit::pipeline_layout_create_info();
     meshShaderLayoutInfo.setLayoutCount = 2;

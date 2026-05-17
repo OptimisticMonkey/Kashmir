@@ -154,7 +154,8 @@ struct GPUMeshShaderPushConstants {
     VkDeviceAddress meshletTriangles;        //  8
     VkDeviceAddress meshletBounds;           //  8
     uint32_t        meshletCount;            //  4
-    uint32_t        instanceCount;           //  4  => 120 bytes (fits in the 128-byte guarantee)
+    uint32_t        instanceCount;           //  4
+    uint32_t        debugFlags;              //  4  bit0 = cluster color, bit1 = lit cluster color
 };
 static_assert(sizeof(GPUMeshShaderPushConstants) <= 128, "Push constant size exceeds typical maxPushConstantsSize");
 

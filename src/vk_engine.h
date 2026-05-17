@@ -269,6 +269,11 @@ public:
 	// Runtime toggle: when true, draw_geometry routes Suzanne's opaque surfaces
 	// through opaqueMeshPipeline + vkCmdDrawMeshTasksEXT instead of vkCmdDrawIndexed.
 	bool _useMeshShaders{ false };
+	// Debug view: paint each meshlet a hashed color. Only active on the mesh-shader
+	// path. _debugClusterLit gates whether PBR lighting is applied on top (otherwise
+	// the fragment shader outputs the flat cluster color directly).
+	bool _debugClusterColor{ false };
+	bool _debugClusterLit{ false };
 	// Loaded from vkGetDeviceProcAddr in init_vulkan.
 	PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasksEXT{ nullptr };
 

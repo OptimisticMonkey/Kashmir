@@ -1,5 +1,37 @@
 import common;
 
+// Mirrors GPUMeshShaderPushConstants (vk_types.h). Only `debugFlags` is read
+// in the fragment stage; the buffer-address fields are layout-padding here.
+struct Meshlet
+{
+    uint vertexOffset;
+    uint triangleOffset;
+    uint vertexCount;
+    uint triangleCount;
+};
+
+struct MeshletBounds
+{
+    float4 centerRadius;
+    float4 coneApex;
+    float4 coneAxisCutoff;
+};
+
+struct PushConstants
+{
+    float4x4           worldMatrix;
+    Vertex*            vertexBuffer;
+    InstanceTransform* instanceTransformBuffer;
+    Meshlet*           meshlets;
+    uint*              meshletVertices;
+    uint*              meshletTriangles;
+    MeshletBounds*     meshletBounds;
+    uint               meshletCount;
+    uint               instanceCount;
+    uint               debugFlags;       // bit0 = cluster color, bit1 = lit cluster color
+};
+[[vk::push_constant]] PushConstants pc;
+
 static const float PI = 3.14159265359;
 
 // GGX / Trowbridge-Reitz normal distribution
@@ -41,6 +73,13 @@ struct FSIn
 [shader("fragment")]
 float4 main(FSIn i) : SV_Target
 {
+    // Debug view: flat cluster color (cluster-color on, lit-cluster-color off).
+    // Bypasses lighting / tonemap / gamma so meshlet boundaries stay crisp.
+    if ((pc.debugFlags & 0x1u) != 0u && (pc.debugFlags & 0x2u) == 0u)
+    {
+        return float4(i.color, 1.0);
+    }
+
     float3 albedo    = i.color * colorTex.Sample(i.uv).rgb;
     float3 mr        = metalRoughTex.Sample(i.uv).rgb;
     float  metallic  = mr.b * materialData.metalRoughFactors.x;
