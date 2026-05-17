@@ -1209,6 +1209,7 @@ void VulkanEngine::cleanup()
                 destroy_buffer(mesh->meshBuffers.meshletBuffer);
                 destroy_buffer(mesh->meshBuffers.meshletVerticesBuffer);
                 destroy_buffer(mesh->meshBuffers.meshletTrianglesBuffer);
+                destroy_buffer(mesh->meshBuffers.meshletBoundsBuffer);
             }
         }
         testMeshes.clear();
@@ -1615,6 +1616,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
             pc.meshletBuffer = draw.meshletBufferAddress;
             pc.meshletVertices = draw.meshletVerticesAddress;
             pc.meshletTriangles = draw.meshletTrianglesAddress;
+            pc.meshletBounds = draw.meshletBoundsAddress;
             pc.meshletCount = draw.meshletCount;
             pc.instanceCount = draw.instanceCount;
 
@@ -1625,7 +1627,12 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
                                sizeof(pc),
                                &pc);
 
-            pfnCmdDrawMeshTasksEXT(cmd, draw.meshletCount, draw.instanceCount, 1);
+            // Task shader: workgroup size 32, each thread handles one meshlet.
+            // Dispatch ceil(meshletCount / 32) task workgroups per instance; the
+            // task shader compacts survivors and DispatchMesh()es the mesh stage.
+            constexpr uint32_t kTaskGroupSize = 32;
+            const uint32_t taskGroupsX = (draw.meshletCount + kTaskGroupSize - 1) / kTaskGroupSize;
+            pfnCmdDrawMeshTasksEXT(cmd, taskGroupsX, draw.instanceCount, 1);
         }
         else
         {
@@ -1765,6 +1772,7 @@ void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
             pc.meshletBuffer = draw.meshletBufferAddress;
             pc.meshletVertices = draw.meshletVerticesAddress;
             pc.meshletTriangles = draw.meshletTrianglesAddress;
+            pc.meshletBounds = draw.meshletBoundsAddress;
             pc.meshletCount = draw.meshletCount;
             pc.instanceCount = draw.instanceCount;
             vkCmdPushConstants(cmd,
@@ -1773,6 +1781,7 @@ void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
                                0,
                                sizeof(pc),
                                &pc);
+            // Shadow pass has no task shader — one mesh workgroup per (meshlet, instance).
             pfnCmdDrawMeshTasksEXT(cmd, draw.meshletCount, draw.instanceCount, 1);
         }
         else
@@ -1861,6 +1870,27 @@ void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
     vkCmdEndRendering(cmd);
 }
 
+// Always-on stats readout. UE analog: `stat fps` / `stat unit Frame`.
+// ImGui maintains a 60-frame moving-average framerate in IO.Framerate, so no
+// manual timing is needed. Drawn as a decoration-less, click-through overlay
+// pinned to the top-left so it doesn't fight the "background" controls panel.
+void VulkanEngine::draw_stats_overlay()
+{
+    const ImGuiIO& io = ImGui::GetIO();
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize
+                           | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing
+                           | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove;
+    ImGui::SetNextWindowPos(ImVec2(10.f, 10.f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.35f);
+    if (ImGui::Begin("Stats", nullptr, flags))
+    {
+        const float fps = io.Framerate;
+        ImGui::Text("FPS:   %6.1f", fps);
+        ImGui::Text("Frame: %6.2f ms", 1000.0f / (fps > 0.f ? fps : 1.f));
+    }
+    ImGui::End();
+}
+
 void VulkanEngine::run()
 {
     SDL_Event e;
@@ -1920,6 +1950,7 @@ void VulkanEngine::run()
         ImGui::NewFrame();
         // some imgui UI to test
         ImGui::ShowDemoWindow();
+        draw_stats_overlay();
         if (ImGui::Begin("background"))
         {
 
@@ -2107,7 +2138,9 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
 {
     constexpr size_t kMaxVerts = 64;
     constexpr size_t kMaxTris  = 124;
-    constexpr float  kConeWeight = 0.0f; // Phase 2: bump for backface-cone culling in the task shader.
+    // Non-zero cone_weight asks meshopt to pick triangle clusterings that produce tight
+    // normal cones — required for the task shader's backface-cone culling to be useful.
+    constexpr float  kConeWeight = 0.5f;
 
     if (vertices.empty() || indices.empty())
     {
@@ -2140,8 +2173,9 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
     // Re-pack the byte triangle stream as one uint32 per triangle (low 24 bits used).
     // This avoids 8-bit storage requirements on the GPU and lets the shader unpack with
     // simple bit shifts.
-    std::vector<uint32_t>  packedTriangles;
-    std::vector<GpuMeshlet> gpuMeshlets(meshletCount);
+    std::vector<uint32_t>         packedTriangles;
+    std::vector<GpuMeshlet>       gpuMeshlets(meshletCount);
+    std::vector<GpuMeshletBounds> gpuBounds(meshletCount);
     packedTriangles.reserve(meshletCount * kMaxTris);
 
     for (size_t i = 0; i < meshletCount; ++i)
@@ -2162,15 +2196,29 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
             const uint32_t c = src[3 * t + 2];
             packedTriangles.push_back(a | (b << 8) | (c << 16));
         }
+
+        // Bounding sphere + normal cone for this meshlet, in mesh-local space.
+        const meshopt_Bounds b = meshopt_computeMeshletBounds(
+            meshletVertices.data() + m.vertex_offset,
+            meshletTrianglesU8.data() + m.triangle_offset,
+            m.triangle_count,
+            &vertices[0].position.x,
+            vertices.size(),
+            sizeof(Vertex));
+
+        gpuBounds[i].centerRadius   = glm::vec4(b.center[0],    b.center[1],    b.center[2],    b.radius);
+        gpuBounds[i].coneApex       = glm::vec4(b.cone_apex[0], b.cone_apex[1], b.cone_apex[2], 0.0f);
+        gpuBounds[i].coneAxisCutoff = glm::vec4(b.cone_axis[0], b.cone_axis[1], b.cone_axis[2], b.cone_cutoff);
     }
 
     // Trim the vertex-index array to what was actually used.
     const meshopt_Meshlet& last = rawMeshlets[meshletCount - 1];
     meshletVertices.resize(last.vertex_offset + last.vertex_count);
 
-    const size_t meshletBufferSize   = gpuMeshlets.size()    * sizeof(GpuMeshlet);
+    const size_t meshletBufferSize   = gpuMeshlets.size()     * sizeof(GpuMeshlet);
     const size_t mverticesBufferSize = meshletVertices.size() * sizeof(uint32_t);
     const size_t trianglesBufferSize = packedTriangles.size() * sizeof(uint32_t);
+    const size_t boundsBufferSize    = gpuBounds.size()       * sizeof(GpuMeshletBounds);
 
     const VkBufferUsageFlags storageUsage =
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -2183,6 +2231,8 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
         create_buffer(mverticesBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "MeshletVertices");
     mesh.meshBuffers.meshletTrianglesBuffer =
         create_buffer(trianglesBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "MeshletTriangles");
+    mesh.meshBuffers.meshletBoundsBuffer =
+        create_buffer(boundsBufferSize, storageUsage, VMA_MEMORY_USAGE_GPU_ONLY, "MeshletBounds");
 
     {
         VkBufferDeviceAddressInfo info{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
@@ -2199,15 +2249,22 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
                                         .buffer = mesh.meshBuffers.meshletTrianglesBuffer.buffer };
         mesh.meshBuffers.meshletTrianglesAddress = vkGetBufferDeviceAddress(_device, &info);
     }
+    {
+        VkBufferDeviceAddressInfo info{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                        .buffer = mesh.meshBuffers.meshletBoundsBuffer.buffer };
+        mesh.meshBuffers.meshletBoundsAddress = vkGetBufferDeviceAddress(_device, &info);
+    }
 
-    AllocatedBuffer staging = create_buffer(meshletBufferSize + mverticesBufferSize + trianglesBufferSize,
+    AllocatedBuffer staging = create_buffer(meshletBufferSize + mverticesBufferSize + trianglesBufferSize + boundsBufferSize,
                                             VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                             VMA_MEMORY_USAGE_CPU_ONLY,
                                             "MeshletStaging");
     void* data = staging.allocation->GetMappedData();
-    memcpy(data, gpuMeshlets.data(), meshletBufferSize);
-    memcpy(static_cast<char*>(data) + meshletBufferSize, meshletVertices.data(), mverticesBufferSize);
-    memcpy(static_cast<char*>(data) + meshletBufferSize + mverticesBufferSize, packedTriangles.data(), trianglesBufferSize);
+    char* cursor = static_cast<char*>(data);
+    memcpy(cursor, gpuMeshlets.data(), meshletBufferSize);          cursor += meshletBufferSize;
+    memcpy(cursor, meshletVertices.data(), mverticesBufferSize);    cursor += mverticesBufferSize;
+    memcpy(cursor, packedTriangles.data(), trianglesBufferSize);    cursor += trianglesBufferSize;
+    memcpy(cursor, gpuBounds.data(), boundsBufferSize);
 
     immediate_submit(
         [&](VkCommandBuffer cmd)
@@ -2225,17 +2282,22 @@ void VulkanEngine::InitClusters(MeshAsset& mesh, std::span<Vertex> vertices, std
             copy.srcOffset = meshletBufferSize + mverticesBufferSize;
             copy.size = trianglesBufferSize;
             vkCmdCopyBuffer(cmd, staging.buffer, mesh.meshBuffers.meshletTrianglesBuffer.buffer, 1, &copy);
+
+            copy.srcOffset = meshletBufferSize + mverticesBufferSize + trianglesBufferSize;
+            copy.size = boundsBufferSize;
+            vkCmdCopyBuffer(cmd, staging.buffer, mesh.meshBuffers.meshletBoundsBuffer.buffer, 1, &copy);
         });
 
     destroy_buffer(staging);
 
     mesh.meshBuffers.meshletCount = static_cast<uint32_t>(meshletCount);
 
-    fmt::println("InitClusters: mesh '{}' -> {} meshlets ({} verts, {} packed tris)",
+    fmt::println("InitClusters: mesh '{}' -> {} meshlets ({} verts, {} packed tris, {} bounds)",
                  mesh.name,
                  meshletCount,
                  meshletVertices.size(),
-                 packedTriangles.size());
+                 packedTriangles.size(),
+                 gpuBounds.size());
 }
 
 void VulkanEngine::init_mesh_pipeline()
@@ -2604,10 +2666,17 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
         fmt::println("Error loading mesh.mesh.spv");
     }
 
+    // Phase 2: task shader for per-meshlet frustum + backface-cone culling.
+    VkShaderModule meshTaskShader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module("../../shaders/mesh.task.spv", engine->_device, &meshTaskShader))
+    {
+        fmt::println("Error loading mesh.task.spv");
+    }
+
     VkPushConstantRange meshShaderPushRange{};
     meshShaderPushRange.offset = 0;
     meshShaderPushRange.size = sizeof(GPUMeshShaderPushConstants);
-    // Stage flags include TASK bit for Phase-2 readiness — the task shader will share this layout.
+    // Both task and mesh stages read the push constants.
     meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
 
     VkPipelineLayoutCreateInfo meshShaderLayoutInfo = vkinit::pipeline_layout_create_info();
@@ -2621,7 +2690,7 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     opaqueMeshPipeline.layout = meshShaderLayout;
 
     PipelineBuilder meshShaderBuilder;
-    meshShaderBuilder.set_mesh_shaders(VK_NULL_HANDLE, meshMeshShader, meshFragShader);
+    meshShaderBuilder.set_mesh_shaders(meshTaskShader, meshMeshShader, meshFragShader);
     meshShaderBuilder.set_polygon_mode(VK_POLYGON_MODE_FILL);
     meshShaderBuilder.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
     meshShaderBuilder.set_multisampling_none();
@@ -2635,6 +2704,10 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
 
     vkDestroyShaderModule(engine->_device, meshFragShader, nullptr);
     vkDestroyShaderModule(engine->_device, meshMeshShader, nullptr);
+    if (meshTaskShader != VK_NULL_HANDLE)
+    {
+        vkDestroyShaderModule(engine->_device, meshTaskShader, nullptr);
+    }
 }
 
 MaterialInstance GLTFMetallic_Roughness::write_material(VkDevice device,
@@ -2705,6 +2778,7 @@ void MeshNode::Draw(const glm::mat4& topMatrix, DrawContext& ctx, int InstanceCo
         def.meshletBufferAddress = mesh->meshBuffers.meshletBufferAddress;
         def.meshletVerticesAddress = mesh->meshBuffers.meshletVerticesAddress;
         def.meshletTrianglesAddress = mesh->meshBuffers.meshletTrianglesAddress;
+        def.meshletBoundsAddress = mesh->meshBuffers.meshletBoundsAddress;
         def.meshletCount = mesh->meshBuffers.meshletCount;
 
         ctx.OpaqueSurfaces.push_back(def);
