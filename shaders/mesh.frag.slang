@@ -1,36 +1,9 @@
 import common;
 
-// Mirrors GPUMeshShaderPushConstants (vk_types.h). Only `debugFlags` is read
-// in the fragment stage; the buffer-address fields are layout-padding here.
-struct Meshlet
-{
-    uint vertexOffset;
-    uint triangleOffset;
-    uint vertexCount;
-    uint triangleCount;
-};
-
-struct MeshletBounds
-{
-    float4 centerRadius;
-    float4 coneApex;
-    float4 coneAxisCutoff;
-};
-
-struct PushConstants
-{
-    float4x4           worldMatrix;
-    Vertex*            vertexBuffer;
-    InstanceTransform* instanceTransformBuffer;
-    Meshlet*           meshlets;
-    uint*              meshletVertices;
-    uint*              meshletTriangles;
-    MeshletBounds*     meshletBounds;
-    uint               meshletCount;
-    uint               instanceCount;
-    uint               debugFlags;       // bit0 = cluster color, bit1 = lit cluster color
-};
-[[vk::push_constant]] PushConstants pc;
+// Cluster-color debug flags are read from sceneData.debugParams (UBO) — NOT
+// push constants — because the regular (non-mesh-shader) opaque pipeline's
+// push range is VERTEX-only and 80 bytes, which would leave a fragment-stage
+// read of pc.debugFlags out-of-range and trigger undefined behavior.
 
 static const float PI = 3.14159265359;
 
@@ -75,7 +48,7 @@ float4 main(FSIn i) : SV_Target
 {
     // Debug view: flat cluster color (cluster-color on, lit-cluster-color off).
     // Bypasses lighting / tonemap / gamma so meshlet boundaries stay crisp.
-    if ((pc.debugFlags & 0x1u) != 0u && (pc.debugFlags & 0x2u) == 0u)
+    if (sceneData.debugParams.x > 0.5 && sceneData.debugParams.y < 0.5)
     {
         return float4(i.color, 1.0);
     }
@@ -109,7 +82,7 @@ float4 main(FSIn i) : SV_Target
     float3 diffuse = kd * albedo / PI;
 
     float3 sun    = sceneData.sunlightColor.rgb * sceneData.sunlightColor.w;
-    float  shadow = sampleShadow(i.shadowCoord);
+    float  shadow = computeShadow(i.worldPos, L, N, i.shadowCoord);
     float3 Lo     = (diffuse + specular) * sun * NoL * shadow;
 
     // Hemispheric ambient: blend sky/ground by N.y.
