@@ -119,8 +119,11 @@ struct GpuMeshletBounds {
 struct GPUMeshBuffers {
 
     AllocatedBuffer indexBuffer;
+    VkDeviceAddress indexBufferAddress{ 0 };
     AllocatedBuffer vertexBuffer;
     VkDeviceAddress vertexBufferAddress;
+    uint32_t        indexCount{ 0 };
+    uint32_t        vertexCount{ 0 };
     AllocatedBuffer instanceTransformBuffer;
     VkDeviceAddress instanceTransformBufferAddress;
 
@@ -135,6 +138,12 @@ struct GPUMeshBuffers {
     VkDeviceAddress meshletTrianglesAddress{ 0 };
     VkDeviceAddress meshletBoundsAddress{ 0 };
     uint32_t        meshletCount{ 0 };
+
+    // Raytracing BLAS for this mesh. Built lazily by VulkanEngine::build_blas
+    // after the mesh is uploaded. Zero/null when raytraced shadows are unused.
+    VkAccelerationStructureKHR blas{ VK_NULL_HANDLE };
+    AllocatedBuffer            blasBuffer{};
+    VkDeviceAddress            blasAddress{ 0 };
 };
 
 // push constants for our mesh object draws
@@ -145,6 +154,7 @@ struct GPUDrawPushConstants {
 };
 
 // Push constants for the mesh-shader rendering path.
+// Cluster-color debug flags now live in GPUSceneData::debugParams (UBO).
 struct GPUMeshShaderPushConstants {
     glm::mat4       worldMatrix;             // 64
     VkDeviceAddress vertexBuffer;            //  8
@@ -154,8 +164,7 @@ struct GPUMeshShaderPushConstants {
     VkDeviceAddress meshletTriangles;        //  8
     VkDeviceAddress meshletBounds;           //  8
     uint32_t        meshletCount;            //  4
-    uint32_t        instanceCount;           //  4
-    uint32_t        debugFlags;              //  4  bit0 = cluster color, bit1 = lit cluster color
+    uint32_t        instanceCount;           //  4  => 120 bytes
 };
 static_assert(sizeof(GPUMeshShaderPushConstants) <= 128, "Push constant size exceeds typical maxPushConstantsSize");
 

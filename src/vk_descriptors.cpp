@@ -226,11 +226,35 @@ void DescriptorWriter::write_image(int binding, VkImageView image, VkSampler sam
     writes.push_back(write);
 }
 
+void DescriptorWriter::write_as(int binding, VkAccelerationStructureKHR as)
+{
+    VkAccelerationStructureKHR& handle = asHandles.emplace_back(as);
+
+    VkWriteDescriptorSetAccelerationStructureKHR& asInfo =
+        asWrites.emplace_back(VkWriteDescriptorSetAccelerationStructureKHR{
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+            .pNext = nullptr,
+            .accelerationStructureCount = 1,
+            .pAccelerationStructures = &handle,
+        });
+
+    VkWriteDescriptorSet write = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+    write.pNext = &asInfo;
+    write.dstBinding = binding;
+    write.dstSet = VK_NULL_HANDLE;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+
+    writes.push_back(write);
+}
+
 void DescriptorWriter::clear()
 {
     imageInfos.clear();
     writes.clear();
     bufferInfos.clear();
+    asWrites.clear();
+    asHandles.clear();
 }
 
 void DescriptorWriter::update_set(VkDevice device, VkDescriptorSet set)

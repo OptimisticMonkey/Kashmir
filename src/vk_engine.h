@@ -74,6 +74,15 @@ struct GPUSceneData {
 	glm::vec4 sunlightColor;
 	glm::vec4 cameraPos;          // world-space camera position
 	glm::vec4 groundColor;        // hemispheric ambient: surfaces facing down
+	// .x = shadowMode (0 = rasterized shadow map, 1 = raytraced ray-query).
+	// Other components reserved. Kept as a float4 to preserve std140 alignment
+	// for the UBO. Mirrored in shaders/common.slang::SceneData.shadowParams.
+	glm::vec4 shadowParams;
+	// Mesh-shader debug-view flags. .x = cluster color, .y = lit cluster color.
+	// Lives in the UBO (not push constants) so the regular non-mesh-shader
+	// fragment pipeline — whose push range is VERTEX-only and 80 bytes — can read
+	// it without out-of-range / wrong-stage push-constant access.
+	glm::vec4 debugParams;
 };
 
 struct ComputePushConstants {
@@ -276,6 +285,42 @@ public:
 	bool _debugClusterLit{ false };
 	// Loaded from vkGetDeviceProcAddr in init_vulkan.
 	PFN_vkCmdDrawMeshTasksEXT pfnCmdDrawMeshTasksEXT{ nullptr };
+
+	// --- Raytraced shadows (VK_KHR_ray_query) ---------------------------------
+	// Runtime toggle: when true, draw() skips draw_shadow() and instead builds
+	// a TLAS via build_tlas(); the fragment shaders read sceneTLAS for occlusion.
+	bool _useRaytracedShadows{ false };
+
+	// Loaded from vkGetDeviceProcAddr in init_vulkan.
+	PFN_vkCreateAccelerationStructureKHR        pfnCreateAccelerationStructureKHR{ nullptr };
+	PFN_vkDestroyAccelerationStructureKHR       pfnDestroyAccelerationStructureKHR{ nullptr };
+	PFN_vkCmdBuildAccelerationStructuresKHR     pfnCmdBuildAccelerationStructuresKHR{ nullptr };
+	PFN_vkGetAccelerationStructureBuildSizesKHR pfnGetAccelerationStructureBuildSizesKHR{ nullptr };
+	PFN_vkGetAccelerationStructureDeviceAddressKHR pfnGetAccelerationStructureDeviceAddressKHR{ nullptr };
+
+	VkDeviceSize _asScratchAlignment{ 256 };
+	AllocatedBuffer _asScratchBuffer{};
+
+	// Placeholder TLAS bound when raytraced shadows are disabled so the
+	// descriptor at binding 2 always references a valid acceleration structure.
+	VkAccelerationStructureKHR _placeholderTlas{ VK_NULL_HANDLE };
+	AllocatedBuffer            _placeholderTlasBuffer{};
+
+	// Live TLAS rebuilt each frame when raytraced shadows are enabled. The
+	// previous frame's handle + storage buffer are pushed into the frame
+	// deletion queue when a new one is built.
+	VkAccelerationStructureKHR _tlas{ VK_NULL_HANDLE };
+
+	// Compute pipeline that writes VkAccelerationStructureInstanceKHR records
+	// from animated instance transforms.
+	VkPipeline       _tlasInstancePipeline{ VK_NULL_HANDLE };
+	VkPipelineLayout _tlasInstancePipelineLayout{ VK_NULL_HANDLE };
+
+	void init_raytracing();
+	void init_tlas_instance_pipeline();
+	void build_blas(struct MeshAsset& mesh);
+	void destroy_blas(struct GPUMeshBuffers& mb);
+	void build_tlas(VkCommandBuffer cmd);
 
 	AllocatedBuffer create_buffer(size_t allocSize, VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, const char* debugName);
 	void destroy_buffer(const AllocatedBuffer& buffer);

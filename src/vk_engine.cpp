@@ -78,6 +78,8 @@ void VulkanEngine::init()
 
     init_pipelines();
 
+    init_raytracing();
+
     init_imgui();
 
     init_default_data();
@@ -288,6 +290,7 @@ void VulkanEngine::init_pipelines()
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
     init_ground_pipeline();
+    init_tlas_instance_pipeline();
 }
 
 void VulkanEngine::init_ground_pipeline()
@@ -784,9 +787,15 @@ void VulkanEngine::init_descriptors()
         DescriptorLayoutBuilder builder;
         builder.add_binding(0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
         builder.add_binding(1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER); // shadow map
+        builder.add_binding(2, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR); // raytraced-shadow TLAS
+        // TASK_BIT_EXT is needed because mesh.task.slang reads sceneData.viewproj
+        // for the per-meshlet frustum cull. Layout was missing this stage prior
+        // to raytraced shadows; the new TLAS binding (only read in FRAGMENT) made
+        // validation flag it during the wider descriptor sweep.
         _gpuSceneDataDescriptorLayout =
             builder.build(_device,
-                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT);
+                          VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_TASK_BIT_EXT |
+                              VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT);
     }
 
     // make sure both the descriptor allocator and the new layout get cleaned up properly
@@ -809,6 +818,7 @@ void VulkanEngine::init_descriptors()
             { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3 },
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 3 },
             { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4 },
+            { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 2 },
         };
 
         _frames[i]._frameDescriptors = DescriptorAllocatorGrowable{};
@@ -890,6 +900,17 @@ void VulkanEngine::init_vulkan()
     meshShaderFeatures.meshShader = VK_TRUE;
     meshShaderFeatures.taskShader = VK_TRUE;
 
+    // VK_KHR_acceleration_structure + VK_KHR_ray_query — feeds the raytraced
+    // shadow path. Ray query (vs full RT pipeline) is sufficient because the
+    // shadow lookup happens inside the existing fragment shaders.
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeat{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR };
+    asFeat.accelerationStructure = VK_TRUE;
+
+    VkPhysicalDeviceRayQueryFeaturesKHR rqFeat{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR };
+    rqFeat.rayQuery = VK_TRUE;
+
     // use vkbootstrap to select a gpu.
     // We want a gpu that can write to the SDL surface and supports vulkan 1.3 with the correct features
     vkb::PhysicalDeviceSelector selector{ vkb_inst };
@@ -899,6 +920,11 @@ void VulkanEngine::init_vulkan()
                                              .set_required_features_11(features11)
                                              .add_required_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME)
                                              .add_required_extension_features(meshShaderFeatures)
+                                             .add_required_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME)
+                                             .add_required_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME)
+                                             .add_required_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)
+                                             .add_required_extension_features(asFeat)
+                                             .add_required_extension_features(rqFeat)
                                              .set_surface(_surface)
                                              .select()
                                              .value();
@@ -918,6 +944,32 @@ void VulkanEngine::init_vulkan()
     pfnCmdDrawMeshTasksEXT = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
         vkGetDeviceProcAddr(_device, "vkCmdDrawMeshTasksEXT"));
     assert(pfnCmdDrawMeshTasksEXT && "vkCmdDrawMeshTasksEXT not available");
+
+    // Ray-tracing acceleration-structure entry points. vk-bootstrap does not
+    // surface these; load them manually like vkCmdDrawMeshTasksEXT above.
+    pfnCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(_device, "vkCreateAccelerationStructureKHR"));
+    pfnDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(_device, "vkDestroyAccelerationStructureKHR"));
+    pfnCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        vkGetDeviceProcAddr(_device, "vkCmdBuildAccelerationStructuresKHR"));
+    pfnGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+        vkGetDeviceProcAddr(_device, "vkGetAccelerationStructureBuildSizesKHR"));
+    pfnGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+        vkGetDeviceProcAddr(_device, "vkGetAccelerationStructureDeviceAddressKHR"));
+    assert(pfnCreateAccelerationStructureKHR && "VK_KHR_acceleration_structure entry points not available");
+    assert(pfnDestroyAccelerationStructureKHR);
+    assert(pfnCmdBuildAccelerationStructuresKHR);
+    assert(pfnGetAccelerationStructureBuildSizesKHR);
+    assert(pfnGetAccelerationStructureDeviceAddressKHR);
+
+    // Capture scratch-buffer alignment required by AS builds.
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR asProps{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR };
+    VkPhysicalDeviceProperties2 props2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2 };
+    props2.pNext = &asProps;
+    vkGetPhysicalDeviceProperties2(_chosenGPU, &props2);
+    _asScratchAlignment = std::max<VkDeviceSize>(asProps.minAccelerationStructureScratchOffsetAlignment, 256);
 
     // initialize the memory allocator
     VmaAllocatorCreateInfo allocatorInfo = {};
@@ -1201,6 +1253,7 @@ void VulkanEngine::cleanup()
         loadedScenes.clear();
         for (auto& mesh : testMeshes)
         {
+            destroy_blas(mesh->meshBuffers);
             destroy_buffer(mesh->meshBuffers.indexBuffer);
             destroy_buffer(mesh->meshBuffers.vertexBuffer);
             destroy_buffer(mesh->meshBuffers.instanceTransformBuffer);
@@ -1351,10 +1404,31 @@ void VulkanEngine::draw()
 
     update_transform(cmd);
 
-    // Render the directional shadow map after instance transforms are written
-    // (the shadow vertex shader reads the same instance transform buffer the
-    // camera pass uses) and before the lighting passes that sample it.
-    draw_shadow(cmd);
+    if (_useRaytracedShadows)
+    {
+        // Raytraced-shadow path: build a fresh TLAS over the just-animated
+        // instance buffer and let the fragment shaders sample it via ray query.
+        // The rasterized shadow map is skipped entirely. We still need the
+        // shadow image to be in SHADER_READ_ONLY_OPTIMAL for the descriptor
+        // write — its contents are never sampled when shadowMode = 1.
+        vkutil::transition_image(cmd,
+                                 _shadowImage.image,
+                                 VK_IMAGE_LAYOUT_UNDEFINED,
+                                 VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                 VK_IMAGE_ASPECT_DEPTH_BIT);
+        build_tlas(cmd);
+    }
+    else
+    {
+        // Rasterized-shadow path. Bind the placeholder TLAS so the descriptor
+        // at binding 2 is always valid even though no ray-query is issued.
+        _tlas = _placeholderTlas;
+
+        // Render the directional shadow map after instance transforms are written
+        // (the shadow vertex shader reads the same instance transform buffer the
+        // camera pass uses) and before the lighting passes that sample it.
+        draw_shadow(cmd);
+    }
 
     draw_geometry(cmd);
 
@@ -1571,6 +1645,9 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
                        _shadowSampler,
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+    // Raytracing TLAS. _tlas is the placeholder when _useRaytracedShadows is
+    // off; build_tlas overwrites it for the current frame when on.
+    writer.write_as(2, _tlas);
     writer.update_set(_device, globalDescriptor);
 
     // push_constants.vertexBuffer = testMeshes[2]->meshBuffers.vertexBufferAddress;
@@ -1619,13 +1696,10 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
             pc.meshletBounds = draw.meshletBoundsAddress;
             pc.meshletCount = draw.meshletCount;
             pc.instanceCount = draw.instanceCount;
-            pc.debugFlags = 0u;
-            if (_debugClusterColor) pc.debugFlags |= 0x1u;
-            if (_debugClusterLit)   pc.debugFlags |= 0x2u;
 
             vkCmdPushConstants(cmd,
                                pp->layout,
-                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT,
                                0,
                                sizeof(pc),
                                &pc);
@@ -1712,6 +1786,9 @@ void VulkanEngine::draw_shadow(VkCommandBuffer cmd)
                            _shadowSampler,
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                            VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
+        // TLAS binding is required by the layout even though the shadow caster
+        // shaders don't consume it. The placeholder is sufficient here.
+        writer.write_as(2, _placeholderTlas);
         writer.update_set(_device, shadowSceneSet);
     }
 
@@ -1850,7 +1927,8 @@ void VulkanEngine::update_transform(VkCommandBuffer cmd)
     // (traditional path) or the mesh shader (mesh-shader path). Include both.
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT,
+                         VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0,
                          1,
                          &barrier,
@@ -1858,6 +1936,470 @@ void VulkanEngine::update_transform(VkCommandBuffer cmd)
                          nullptr,
                          0,
                          nullptr);
+}
+
+// =============================================================================
+// Raytraced shadows — VK_KHR_acceleration_structure + VK_KHR_ray_query.
+//
+// Pipeline:
+//   build_blas (one-time per MeshAsset, called from loadGltfMeshes)
+//     -> AllocatedBuffer::blasBuffer holds the AS storage
+//     -> mb.blas, mb.blasAddress populated
+//   init_raytracing (startup)
+//     -> _placeholderTlas, _placeholderTlasBuffer (empty 0-instance TLAS)
+//     -> _asScratchBuffer (grows on demand)
+//     -> _tlas = _placeholderTlas
+//   build_tlas (every frame when _useRaytracedShadows=true)
+//     -> dispatch build_tlas_instances.comp to write VkASInstance records
+//     -> vkCmdBuildAccelerationStructuresKHR builds a fresh top-level
+//     -> previous _tlas + its buffer pushed to frame deletion queue
+// =============================================================================
+
+namespace {
+
+inline VkDeviceSize align_up(VkDeviceSize v, VkDeviceSize a)
+{
+    return (v + a - 1) & ~(a - 1);
+}
+
+// Mirror of shaders/build_tlas_instances.comp.slang::BuildTlasPC.
+struct BuildTlasInstancesPC
+{
+    VkDeviceAddress srcTransforms;            // 8
+    VkDeviceAddress outInstances;             // 8
+    uint32_t        blasLow;                  // 4
+    uint32_t        blasHigh;                 // 4
+    uint32_t        count;                    // 4
+    uint32_t        outOffset;                // 4
+    uint32_t        instanceCustomIndexBase;  // 4
+    uint32_t        flagsAndMask;             // 4
+};
+static_assert(sizeof(BuildTlasInstancesPC) == 40,
+              "BuildTlasInstancesPC must match shaders/build_tlas_instances.comp.slang");
+
+} // namespace
+
+void VulkanEngine::init_raytracing()
+{
+    // Persistent scratch buffer. Grows on demand inside build_blas / build_tlas.
+    _asScratchBuffer = create_buffer(
+        64 * 1024,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        "ASScratch");
+    _mainDeletionQueue.push_function([this]() { destroy_buffer(_asScratchBuffer); });
+
+    // Empty placeholder TLAS bound when raytraced shadows are disabled. The
+    // ray query is also disabled in that mode so the contents are irrelevant —
+    // we only need a valid descriptor handle.
+    VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    geom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geom.geometry.instances.arrayOfPointers = VK_FALSE;
+    geom.geometry.instances.data.deviceAddress = 0;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR build{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = 1;
+    build.pGeometries = &geom;
+
+    uint32_t maxPrimitiveCount = 0;
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    pfnGetAccelerationStructureBuildSizesKHR(
+        _device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &maxPrimitiveCount, &sizeInfo);
+
+    const VkDeviceSize storageSize = std::max<VkDeviceSize>(sizeInfo.accelerationStructureSize, 256);
+    _placeholderTlasBuffer = create_buffer(
+        storageSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        "PlaceholderTLAS");
+
+    VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+    ci.buffer = _placeholderTlasBuffer.buffer;
+    ci.size = storageSize;
+    ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    VK_CHECK(pfnCreateAccelerationStructureKHR(_device, &ci, nullptr, &_placeholderTlas));
+
+    // Grow scratch if needed for this empty build.
+    const VkDeviceSize scratchNeeded = align_up(std::max<VkDeviceSize>(sizeInfo.buildScratchSize, 256),
+                                                _asScratchAlignment);
+    if (_asScratchBuffer.info.size < scratchNeeded)
+    {
+        destroy_buffer(_asScratchBuffer);
+        _asScratchBuffer = create_buffer(
+            scratchNeeded,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            "ASScratch");
+    }
+
+    VkBufferDeviceAddressInfo scratchAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                               nullptr,
+                                               _asScratchBuffer.buffer };
+    VkDeviceAddress scratchAddr = vkGetBufferDeviceAddress(_device, &scratchAddrInfo);
+    scratchAddr = align_up(scratchAddr, _asScratchAlignment);
+
+    build.dstAccelerationStructure = _placeholderTlas;
+    build.scratchData.deviceAddress = scratchAddr;
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = 0;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    immediate_submit([&](VkCommandBuffer cmd)
+                     { pfnCmdBuildAccelerationStructuresKHR(cmd, 1, &build, &pRange); });
+
+    _tlas = _placeholderTlas;
+
+    _mainDeletionQueue.push_function(
+        [this]()
+        {
+            if (_placeholderTlas)
+            {
+                pfnDestroyAccelerationStructureKHR(_device, _placeholderTlas, nullptr);
+                _placeholderTlas = VK_NULL_HANDLE;
+            }
+            destroy_buffer(_placeholderTlasBuffer);
+        });
+}
+
+void VulkanEngine::init_tlas_instance_pipeline()
+{
+    VkPushConstantRange pushRange{};
+    pushRange.offset = 0;
+    pushRange.size = sizeof(BuildTlasInstancesPC);
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    layoutInfo.setLayoutCount = 0;
+    VK_CHECK(vkCreatePipelineLayout(_device, &layoutInfo, nullptr, &_tlasInstancePipelineLayout));
+
+    VkShaderModule shader = VK_NULL_HANDLE;
+    if (!vkutil::load_shader_module("../../shaders/build_tlas_instances.comp.spv", _device, &shader))
+    {
+        fmt::println("Error loading build_tlas_instances.comp.spv");
+    }
+
+    VkPipelineShaderStageCreateInfo stageInfo{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = shader;
+    stageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo pipeInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
+    pipeInfo.layout = _tlasInstancePipelineLayout;
+    pipeInfo.stage = stageInfo;
+    VK_CHECK(vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &pipeInfo, nullptr, &_tlasInstancePipeline));
+
+    vkDestroyShaderModule(_device, shader, nullptr);
+
+    _mainDeletionQueue.push_function(
+        [this]()
+        {
+            vkDestroyPipeline(_device, _tlasInstancePipeline, nullptr);
+            vkDestroyPipelineLayout(_device, _tlasInstancePipelineLayout, nullptr);
+        });
+}
+
+void VulkanEngine::build_blas(MeshAsset& mesh)
+{
+    GPUMeshBuffers& mb = mesh.meshBuffers;
+    if (mb.indexCount == 0 || mb.vertexCount == 0) return;
+    if (mb.blas != VK_NULL_HANDLE) return;
+
+    const uint32_t primitiveCount = mb.indexCount / 3;
+
+    VkAccelerationStructureGeometryKHR geom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    geom.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geom.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    geom.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    geom.geometry.triangles.vertexData.deviceAddress = mb.vertexBufferAddress;
+    geom.geometry.triangles.vertexStride = sizeof(Vertex);
+    geom.geometry.triangles.maxVertex = mb.vertexCount > 0 ? mb.vertexCount - 1 : 0;
+    geom.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
+    geom.geometry.triangles.indexData.deviceAddress = mb.indexBufferAddress;
+    geom.geometry.triangles.transformData.deviceAddress = 0;
+
+    VkAccelerationStructureBuildGeometryInfoKHR build{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    build.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    build.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    build.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    build.geometryCount = 1;
+    build.pGeometries = &geom;
+
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    pfnGetAccelerationStructureBuildSizesKHR(
+        _device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &build, &primitiveCount, &sizeInfo);
+
+    mb.blasBuffer = create_buffer(
+        sizeInfo.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        "BLAS");
+
+    VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+    ci.buffer = mb.blasBuffer.buffer;
+    ci.size = sizeInfo.accelerationStructureSize;
+    ci.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    VK_CHECK(pfnCreateAccelerationStructureKHR(_device, &ci, nullptr, &mb.blas));
+
+    const VkDeviceSize scratchNeeded = align_up(sizeInfo.buildScratchSize, _asScratchAlignment);
+    if (_asScratchBuffer.info.size < scratchNeeded)
+    {
+        destroy_buffer(_asScratchBuffer);
+        _asScratchBuffer = create_buffer(
+            scratchNeeded,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            "ASScratch");
+    }
+
+    VkBufferDeviceAddressInfo scratchAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                               nullptr,
+                                               _asScratchBuffer.buffer };
+    VkDeviceAddress scratchAddr = vkGetBufferDeviceAddress(_device, &scratchAddrInfo);
+    scratchAddr = align_up(scratchAddr, _asScratchAlignment);
+
+    build.dstAccelerationStructure = mb.blas;
+    build.scratchData.deviceAddress = scratchAddr;
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = primitiveCount;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+
+    immediate_submit([&](VkCommandBuffer cmd)
+                     { pfnCmdBuildAccelerationStructuresKHR(cmd, 1, &build, &pRange); });
+
+    VkAccelerationStructureDeviceAddressInfoKHR addrInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR };
+    addrInfo.accelerationStructure = mb.blas;
+    mb.blasAddress = pfnGetAccelerationStructureDeviceAddressKHR(_device, &addrInfo);
+}
+
+void VulkanEngine::destroy_blas(GPUMeshBuffers& mb)
+{
+    if (mb.blas)
+    {
+        pfnDestroyAccelerationStructureKHR(_device, mb.blas, nullptr);
+        mb.blas = VK_NULL_HANDLE;
+    }
+    if (mb.blasBuffer.buffer)
+    {
+        destroy_buffer(mb.blasBuffer);
+        mb.blasBuffer = {};
+    }
+    mb.blasAddress = 0;
+}
+
+void VulkanEngine::build_tlas(VkCommandBuffer cmd)
+{
+    // Gather unique (mesh, instance count) pairs from the current draw list,
+    // mirroring update_transform's dedup so the same instance buffer drives
+    // both update_transform and TLAS-instance writes. Skip meshes without a
+    // BLAS (e.g. a glb that failed AS-input flag setup).
+    struct MeshBatch
+    {
+        VkDeviceAddress srcTransforms;
+        VkDeviceAddress blasAddress;
+        uint32_t        count;
+    };
+    std::vector<MeshBatch> batches;
+    batches.reserve(mainDrawContext.OpaqueSurfaces.size());
+    std::unordered_set<VkDeviceAddress> seen;
+    uint32_t totalInstances = 0;
+
+    // Skip the ground — it's a single-instance static mesh whose vertex shader
+    // ignores instanceTransformBuffer (uses pc.renderMatrix instead). Reading
+    // transform 0 from that buffer would pick up stale random spawner data from
+    // uploadMesh and stamp a ghost ground at the origin, which then shadows
+    // every visible ground fragment. Matches the draw_shadow filter — the
+    // rasterized path also excludes the ground from caster geometry.
+    VkDeviceAddress groundAddr =
+        _groundNode ? _groundNode->mesh->meshBuffers.instanceTransformBufferAddress : 0;
+
+    for (const RenderObject& draw : mainDrawContext.OpaqueSurfaces)
+    {
+        if (draw.instanceTransformBufferAddress == groundAddr) continue;
+        if (!seen.insert(draw.instanceTransformBufferAddress).second) continue;
+        if (draw.instanceCount == 0) continue;
+        // Need a BLAS for this mesh. Skip if none was built.
+        if (draw.indexBuffer == VK_NULL_HANDLE) continue;
+        // Look up BLAS via the index buffer match. We don't store the BLAS
+        // address on RenderObject (kept slim for the hot draw path), so walk
+        // the loaded meshes to find it.
+        VkDeviceAddress blasAddr = 0;
+        for (const auto& mesh : testMeshes)
+        {
+            if (mesh->meshBuffers.indexBuffer.buffer == draw.indexBuffer && mesh->meshBuffers.blasAddress)
+            {
+                blasAddr = mesh->meshBuffers.blasAddress;
+                break;
+            }
+        }
+        if (blasAddr == 0) continue;
+        batches.push_back({ draw.instanceTransformBufferAddress, blasAddr, draw.instanceCount });
+        totalInstances += draw.instanceCount;
+    }
+
+    if (totalInstances == 0)
+    {
+        // No real instances this frame — bind the placeholder so the descriptor
+        // stays valid. Any prior frame's real TLAS is already scheduled for
+        // destruction in its own frame's deletion queue.
+        _tlas = _placeholderTlas;
+        return;
+    }
+
+    // Per-frame instance buffer: one VkAccelerationStructureInstanceKHR (64 B) per
+    // instance. Pushed into the frame deletion queue so it survives in-flight reads.
+    constexpr VkDeviceSize kInstanceStride = 64;
+    AllocatedBuffer instBuffer = create_buffer(
+        totalInstances * kInstanceStride,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+            VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        "TLASInstances");
+    get_current_frame()._deletionQueue.push_function([this, instBuffer]() { destroy_buffer(instBuffer); });
+
+    VkBufferDeviceAddressInfo instAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, nullptr, instBuffer.buffer };
+    const VkDeviceAddress instAddr = vkGetBufferDeviceAddress(_device, &instAddrInfo);
+
+    // Dispatch instance-record compute. The barrier from update_transform's
+    // tail (added above) already covers compute→compute on the source buffer.
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _tlasInstancePipeline);
+
+    uint32_t writeOffset = 0;
+    for (const MeshBatch& b : batches)
+    {
+        BuildTlasInstancesPC pc{};
+        pc.srcTransforms = b.srcTransforms;
+        pc.outInstances = instAddr;
+        pc.blasLow = static_cast<uint32_t>(b.blasAddress & 0xFFFFFFFFu);
+        pc.blasHigh = static_cast<uint32_t>((b.blasAddress >> 32) & 0xFFFFFFFFu);
+        pc.count = b.count;
+        pc.outOffset = writeOffset;
+        pc.instanceCustomIndexBase = writeOffset;
+        // Low 8 bits = flags (CULL_DISABLE so two-sided geometry works regardless of winding).
+        // Next 8 bits = mask (0xFF means "visible to all rays").
+        pc.flagsAndMask = (uint32_t)VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR
+                        | (0xFFu << 8u);
+        vkCmdPushConstants(
+            cmd, _tlasInstancePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (b.count + 63) / 64, 1, 1);
+        writeOffset += b.count;
+    }
+
+    // Compute-write → AS-build-read barrier (sync2).
+    {
+        VkBufferMemoryBarrier2 bb{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+        bb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        bb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        bb.dstStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        bb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        bb.buffer = instBuffer.buffer;
+        bb.offset = 0;
+        bb.size = VK_WHOLE_SIZE;
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.bufferMemoryBarrierCount = 1;
+        dep.pBufferMemoryBarriers = &bb;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // Set up TLAS build geometry referencing the instance buffer just filled.
+    VkAccelerationStructureGeometryKHR tlasGeom{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
+    tlasGeom.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    tlasGeom.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    tlasGeom.geometry.instances.arrayOfPointers = VK_FALSE;
+    tlasGeom.geometry.instances.data.deviceAddress = instAddr;
+    tlasGeom.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &tlasGeom;
+
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR };
+    pfnGetAccelerationStructureBuildSizesKHR(
+        _device, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR, &buildInfo, &totalInstances, &sizeInfo);
+
+    AllocatedBuffer tlasStorage = create_buffer(
+        sizeInfo.accelerationStructureSize,
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        "TLAS");
+
+    VkAccelerationStructureCreateInfoKHR ci{ VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR };
+    ci.buffer = tlasStorage.buffer;
+    ci.size = sizeInfo.accelerationStructureSize;
+    ci.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    VkAccelerationStructureKHR newTlas = VK_NULL_HANDLE;
+    VK_CHECK(pfnCreateAccelerationStructureKHR(_device, &ci, nullptr, &newTlas));
+
+    const VkDeviceSize scratchNeeded = align_up(sizeInfo.buildScratchSize, _asScratchAlignment);
+    if (_asScratchBuffer.info.size < scratchNeeded)
+    {
+        // Resize is rare (only when instance count grows the worst case beyond
+        // the current allocation). Use immediate_submit to flush in-flight work
+        // before destroying the old scratch buffer.
+        vkDeviceWaitIdle(_device);
+        destroy_buffer(_asScratchBuffer);
+        _asScratchBuffer = create_buffer(
+            scratchNeeded,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            "ASScratch");
+    }
+    VkBufferDeviceAddressInfo scratchAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                               nullptr,
+                                               _asScratchBuffer.buffer };
+    VkDeviceAddress scratchAddr = vkGetBufferDeviceAddress(_device, &scratchAddrInfo);
+    scratchAddr = align_up(scratchAddr, _asScratchAlignment);
+
+    buildInfo.dstAccelerationStructure = newTlas;
+    buildInfo.scratchData.deviceAddress = scratchAddr;
+
+    VkAccelerationStructureBuildRangeInfoKHR range{};
+    range.primitiveCount = totalInstances;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRange = &range;
+    pfnCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRange);
+
+    // AS-write → fragment-shader-read barrier.
+    {
+        VkMemoryBarrier2 mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+        mb.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        mb.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    }
+
+    // The new TLAS handle + its backing storage are owned by THIS frame's
+    // deletion queue. They die when this slot is reused FRAME_OVERLAP frames
+    // later — by then this frame's GPU work has completed (fence guarantees).
+    get_current_frame()._deletionQueue.push_function(
+        [this, newTlas, tlasStorage]()
+        {
+            pfnDestroyAccelerationStructureKHR(_device, newTlas, nullptr);
+            AllocatedBuffer b = tlasStorage;
+            destroy_buffer(b);
+        });
+    _tlas = newTlas;
 }
 
 void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)
@@ -1972,6 +2514,7 @@ void VulkanEngine::run()
             ImGui::Checkbox("Mesh shaders (Suzanne)", &_useMeshShaders);
             ImGui::Checkbox("Debug cluster color", &_debugClusterColor);
             ImGui::Checkbox("Lit cluster color", &_debugClusterLit);
+            ImGui::Checkbox("Raytraced shadows", &_useRaytracedShadows);
         }
         ImGui::End();
 
@@ -2044,16 +2587,18 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
 
     GPUMeshBuffers newSurface;
 
-    // create vertex buffer
+    // create vertex buffer (also serves as AS build input for raytraced shadows)
     newSurface.vertexBuffer = create_buffer(vertexBufferSize,
                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                                                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                                VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                             VMA_MEMORY_USAGE_GPU_ONLY,
                                             "VertexBuffer");
     // find the adress of the vertex buffer
     VkBufferDeviceAddressInfo deviceAdressInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
                                                 .buffer = newSurface.vertexBuffer.buffer };
     newSurface.vertexBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInfo);
+    newSurface.vertexCount = static_cast<uint32_t>(vertices.size());
 
     // create InstanceTransformBuffer
     newSurface.instanceTransformBuffer =
@@ -2067,11 +2612,17 @@ GPUMeshBuffers VulkanEngine::uploadMesh(std::span<uint32_t> indices, std::span<V
                                                                  .buffer = newSurface.instanceTransformBuffer.buffer };
     newSurface.instanceTransformBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressInstanceTransformInfo);
 
-    // create index buffer
+    // create index buffer (also serves as AS build input + needs a device address)
     newSurface.indexBuffer = create_buffer(indexBufferSize,
-                                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                               VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+                                               VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR,
                                            VMA_MEMORY_USAGE_GPU_ONLY,
                                            "IndexBuffer");
+    VkBufferDeviceAddressInfo deviceAdressIndexInfo{ .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+                                                     .buffer = newSurface.indexBuffer.buffer };
+    newSurface.indexBufferAddress = vkGetBufferDeviceAddress(_device, &deviceAdressIndexInfo);
+    newSurface.indexCount = static_cast<uint32_t>(indices.size());
 
     std::vector<InstanceTransform> transforms;
     std::mt19937 rng{ std::random_device{}() };
@@ -2523,6 +3074,13 @@ void VulkanEngine::update_scene()
     sceneData.sunlightColor = glm::vec4(1.f, 0.97f, 0.92f, 1.f);
     sceneData.sunlightDirection = glm::vec4(0, 1, 0.5, 1.f);
     sceneData.cameraPos = glm::vec4(mainCamera.position, 1.f);
+    // .x picks the shadow path in mesh.frag / ground.frag (computeShadow).
+    sceneData.shadowParams = glm::vec4(_useRaytracedShadows ? 1.f : 0.f, 0.f, 0.f, 0.f);
+    // Mesh-shader debug view (cluster-color / lit-cluster-color). Lives in the
+    // UBO so the regular fragment pipeline can read it without push-constant
+    // stage/range issues.
+    sceneData.debugParams =
+        glm::vec4(_debugClusterColor ? 1.f : 0.f, _debugClusterLit ? 1.f : 0.f, 0.f, 0.f);
 
     // Shadow caster view-projection from the sun's perspective. Hand-tuned ortho
     // box covering the suzanne instance cloud near origin (radius ~5) plus the
@@ -2681,9 +3239,9 @@ void GLTFMetallic_Roughness::build_pipelines(VulkanEngine* engine)
     VkPushConstantRange meshShaderPushRange{};
     meshShaderPushRange.offset = 0;
     meshShaderPushRange.size = sizeof(GPUMeshShaderPushConstants);
-    // Task and mesh stages read the buffer addresses; the fragment stage reads
-    // debugFlags for the cluster-color view mode.
-    meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // Task and mesh stages read the buffer addresses. Cluster-debug flags now
+    // live in sceneData (UBO), so the fragment stage no longer needs push access.
+    meshShaderPushRange.stageFlags = VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT;
 
     VkPipelineLayoutCreateInfo meshShaderLayoutInfo = vkinit::pipeline_layout_create_info();
     meshShaderLayoutInfo.setLayoutCount = 2;

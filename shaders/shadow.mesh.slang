@@ -35,7 +35,6 @@ struct PushConstants
     MeshletBounds*     meshletBounds;
     uint               meshletCount;
     uint               instanceCount;
-    uint               debugFlags;
 };
 [[vk::push_constant]] PushConstants pc;
 

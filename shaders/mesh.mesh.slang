@@ -26,7 +26,6 @@ struct PushConstants
     MeshletBounds*     meshletBounds;
     uint               meshletCount;
     uint               instanceCount;
-    uint               debugFlags;       // bit0 = cluster color enabled
 };
 [[vk::push_constant]] PushConstants pc;
 
@@ -102,7 +101,7 @@ void main(
         o.uv          = float2(v.uv_x, v.uv_y);
         o.worldPos    = worldPos.xyz;
         o.shadowCoord = mul(sceneData.lightViewProj, worldPos);
-        if ((pc.debugFlags & 0x1u) != 0u)
+        if (sceneData.debugParams.x > 0.5)
         {
             o.color = hashMeshletColor(meshletIdx);
         }

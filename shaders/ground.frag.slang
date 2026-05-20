@@ -91,7 +91,12 @@ float4 main(FSIn i) : SV_Target
     float3 lightRadiance = sceneData.sunlightColor.rgb * attenuation;
     float3 Lo            = (diffuse + specular) * lightRadiance * NoL;
 
-    Lo *= sampleShadow(i.shadowCoord);
+    // Sun-direction visibility shadows the point-light contribution on the
+    // ground. Matches the legacy rasterized behavior: even though the ground's
+    // primary light source is the point light, the visible occlusion that
+    // sells the scene is the suzanne flock blocking the sun.
+    float3 sunDir = normalize(sceneData.sunlightDirection.xyz);
+    Lo *= computeShadow(i.worldPos, sunDir, N, i.shadowCoord);
 
     // Hemispheric ambient kept off (the GLSL source had it commented). Re-enable
     // by uncommenting if blacks crush too hard.

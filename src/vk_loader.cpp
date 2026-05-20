@@ -211,6 +211,8 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
         }
         newmesh.meshBuffers = engine->uploadMesh(indices, vertices);
         engine->InitClusters(newmesh, vertices, indices);
+        // Build a BLAS so this mesh participates in the raytraced-shadow TLAS.
+        engine->build_blas(newmesh);
 
         meshes.emplace_back(std::make_shared<MeshAsset>(std::move(newmesh)));
     }
@@ -509,6 +511,8 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
 
         newmesh->meshBuffers = engine->uploadMesh(indices, vertices);
+        // Build a BLAS so this mesh participates in the raytraced-shadow TLAS.
+        engine->build_blas(*newmesh);
     }
 
 
@@ -589,6 +593,7 @@ void LoadedGLTF::clearAll()
 
     for (auto& [k, v] : meshes) {
 
+        creator->destroy_blas(v->meshBuffers);
         creator->destroy_buffer(v->meshBuffers.indexBuffer);
         creator->destroy_buffer(v->meshBuffers.vertexBuffer);
         creator->destroy_buffer(v->meshBuffers.instanceTransformBuffer);

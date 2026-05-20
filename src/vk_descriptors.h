@@ -52,10 +52,16 @@ private:
 struct DescriptorWriter {
     std::deque<VkDescriptorImageInfo> imageInfos;
     std::deque<VkDescriptorBufferInfo> bufferInfos;
+    // Storage for VkWriteDescriptorSetAccelerationStructureKHR pNext chains.
+    // std::deque preserves pointers across emplace_back, which the writes vector
+    // relies on (it stashes &asWrites.back() in VkWriteDescriptorSet::pNext).
+    std::deque<VkWriteDescriptorSetAccelerationStructureKHR> asWrites;
+    std::deque<VkAccelerationStructureKHR> asHandles;
     std::vector<VkWriteDescriptorSet> writes;
 
     void write_image(int binding, VkImageView image, VkSampler sampler, VkImageLayout layout, VkDescriptorType type);
     void write_buffer(int binding, VkBuffer buffer, size_t size, size_t offset, VkDescriptorType type);
+    void write_as(int binding, VkAccelerationStructureKHR as);
 
     void clear();
     void update_set(VkDevice device, VkDescriptorSet set);
