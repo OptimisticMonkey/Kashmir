@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022 - 2023 spnda
+ * Copyright (C) 2022 - 2024 spnda
  * This file is part of fastgltf <https://github.com/spnda/fastgltf>.
  *
  * Permission is hereby granted, free of charge, to any person
@@ -29,16 +29,26 @@
 
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
+
+#include <imgui.h>
+#include <backends/imgui_impl_glfw.h>
+#include <backends/imgui_impl_opengl3.h>
+
+// All headers not in the root directory require this
+#define GLM_ENABLE_EXPERIMENTAL 1
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-#include <fastgltf/parser.hpp>
+#include <fastgltf/core.hpp>
 #include <fastgltf/types.hpp>
+#include <fastgltf/tools.hpp>
+#include <fastgltf/glm_element_traits.hpp>
 
 constexpr std::string_view vertexShaderSource = R"(
     #version 460 core
@@ -63,6 +73,9 @@ constexpr std::string_view fragmentShaderSource = R"(
     in vec2 texCoord;
     out vec4 finalColor;
 
+	uniform vec2 uvOffset, uvScale;
+	uniform float uvRotation;
+
     const uint HAS_BASE_COLOR_TEXTURE = 1;
 
     layout(location = 0) uniform sampler2D albedoTexture;
@@ -76,10 +89,18 @@ constexpr std::string_view fragmentShaderSource = R"(
         return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
     }
 
+	vec2 transformUv(vec2 uv) {
+		mat2 rotationMat = mat2(
+			cos(uvRotation), -sin(uvRotation),
+		   	sin(uvRotation), cos(uvRotation)
+		);
+		return rotationMat * uv * uvScale + uvOffset;
+	}
+
     void main() {
         vec4 color = material.baseColorFactor;
         if ((material.flags & HAS_BASE_COLOR_TEXTURE) == HAS_BASE_COLOR_TEXTURE) {
-            color *= texture(albedoTexture, texCoord);
+            color *= texture(albedoTexture, transformUv(texCoord));
         }
         float factor = (rand(gl_FragCoord.xy) - 0.5) / 8;
         if (color.a < material.alphaCutoff + factor)
@@ -127,11 +148,16 @@ bool checkGlLinkErrors(GLuint target) {
 }
 
 struct IndirectDrawCommand {
-    uint32_t count;
-    uint32_t instanceCount;
-    uint32_t firstIndex;
-    int32_t baseVertex;
-    uint32_t baseInstance;
+	std::uint32_t count;
+	std::uint32_t instanceCount;
+	std::uint32_t firstIndex;
+	std::int32_t baseVertex;
+	std::uint32_t baseInstance;
+};
+
+struct Vertex {
+	glm::vec3 position;
+	glm::vec2 uv;
 };
 
 struct Primitive {
@@ -140,7 +166,10 @@ struct Primitive {
     GLenum indexType;
     GLuint vertexArray;
 
-    size_t materialUniformsIndex;
+	GLuint vertexBuffer;
+	GLuint indexBuffer;
+
+    std::size_t materialUniformsIndex;
     GLuint albedoTexture;
 };
 
@@ -153,7 +182,7 @@ struct Texture {
     GLuint texture;
 };
 
-enum MaterialUniformFlags : uint32_t {
+enum MaterialUniformFlags : std::uint32_t {
     None = 0 << 0,
     HasBaseColorTexture = 1 << 0,
 };
@@ -161,20 +190,27 @@ enum MaterialUniformFlags : uint32_t {
 struct MaterialUniforms {
     glm::fvec4 baseColorFactor;
     float alphaCutoff;
-    uint32_t flags;
+	std::uint32_t flags;
+
+	glm::vec2 padding;
 };
 
 struct Viewer {
     fastgltf::Asset asset;
 
-    std::vector<GLuint> buffers;
     std::vector<GLuint> bufferAllocations;
     std::vector<Mesh> meshes;
     std::vector<Texture> textures;
+	std::vector<glm::mat4> cameras;
 
     std::vector<MaterialUniforms> materials;
     std::vector<GLuint> materialBuffers;
 
+	GLint uvOffsetUniform = GL_NONE;
+	GLint uvScaleUniform = GL_NONE;
+	GLint uvRotationUniform = GL_NONE;
+
+	glm::ivec2 windowDimensions = glm::ivec2(0);
     glm::mat4 viewMatrix = glm::mat4(1.0f);
     glm::mat4 projectionMatrix = glm::mat4(1.0f);
     GLint viewProjectionMatrixUniform = GL_NONE;
@@ -191,20 +227,22 @@ struct Viewer {
     float yaw = -90.0f;
     float pitch = 0.0f;
     bool firstMouse = true;
+
+	std::size_t sceneIndex = 0;
+	std::size_t materialVariant = 0;
+	fastgltf::Optional<std::size_t> cameraIndex = std::nullopt;
 };
 
 void updateCameraMatrix(Viewer* viewer) {
     glm::mat4 viewProjection = viewer->projectionMatrix * viewer->viewMatrix;
-    glUniformMatrix4fv(viewer->viewProjectionMatrixUniform, 1, GL_FALSE, &viewProjection[0][0]);
+    glUniformMatrix4fv(viewer->viewProjectionMatrixUniform, 1, GL_FALSE, glm::value_ptr(viewProjection));
 }
 
 void windowSizeCallback(GLFWwindow* window, int width, int height) {
     void* ptr = glfwGetWindowUserPointer(window);
     auto* viewer = static_cast<Viewer*>(ptr);
 
-    viewer->projectionMatrix = glm::perspective(glm::radians(75.0f),
-                                                static_cast<float>(width) / static_cast<float>(height),
-                                                0.01f, 1000.0f);
+	viewer->windowDimensions = { width, height };
 
     glViewport(0, 0, width, height);
 }
@@ -212,6 +250,12 @@ void windowSizeCallback(GLFWwindow* window, int width, int height) {
 void cursorCallback(GLFWwindow* window, double xpos, double ypos) {
     void* ptr = glfwGetWindowUserPointer(window);
     auto* viewer = static_cast<Viewer*>(ptr);
+
+	int state = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE);
+	if (state != GLFW_PRESS) {
+		viewer->lastCursorPosition = { xpos, ypos };
+		return;
+	}
 
     if (viewer->firstMouse) {
         viewer->lastCursorPosition = { xpos, ypos };
@@ -236,7 +280,7 @@ void cursorCallback(GLFWwindow* window, double xpos, double ypos) {
 void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods) {
     void* ptr = glfwGetWindowUserPointer(window);
     auto* viewer = static_cast<Viewer*>(ptr);
-    constexpr glm::vec3 cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
+    static constexpr auto cameraUp = glm::vec3(0.0f, 1.0f, 0.0f);
 
     auto& acceleration = viewer->accelerationVector;
     switch (key) {
@@ -264,7 +308,7 @@ glm::mat4 getTransformMatrix(const fastgltf::Node& node, glm::mat4x4& base) {
         return base * glm::mat4x4(glm::make_mat4x4(pMatrix->data()));
     }
 
-	if (const auto* pTransform = std::get_if<fastgltf::Node::TRS>(&node.transform)) {
+	if (const auto* pTransform = std::get_if<fastgltf::TRS>(&node.transform)) {
 		// Warning: The quaternion to mat4x4 conversion here is not correct with all versions of glm.
 		// glTF provides the quaternion as (x, y, z, w), which is the same layout glm used up to version 0.9.9.8.
 		// However, with commit 59ddeb7 (May 2021) the default order was changed to (w, x, y, z).
@@ -290,7 +334,12 @@ bool loadGltf(Viewer* viewer, std::string_view cPath) {
 
     // Parse the glTF file and get the constructed asset
     {
-        fastgltf::Parser parser(fastgltf::Extensions::KHR_mesh_quantization);
+		static constexpr auto supportedExtensions =
+			fastgltf::Extensions::KHR_mesh_quantization |
+			fastgltf::Extensions::KHR_texture_transform |
+			fastgltf::Extensions::KHR_materials_variants;
+
+        fastgltf::Parser parser(supportedExtensions);
 
         auto path = std::filesystem::path{cPath};
 
@@ -305,48 +354,13 @@ bool loadGltf(Viewer* viewer, std::string_view cPath) {
         fastgltf::GltfDataBuffer data;
         data.loadFromFile(path);
 
-        auto type = fastgltf::determineGltfFileType(&data);
-		fastgltf::Expected<fastgltf::Asset> asset(fastgltf::Error::None);
-        if (type == fastgltf::GltfType::glTF) {
-	        asset = parser.loadGLTF(&data, path.parent_path(), gltfOptions);
-        } else if (type == fastgltf::GltfType::GLB) {
-	        asset = parser.loadBinaryGLTF(&data, path.parent_path(), gltfOptions);
-        } else {
-            std::cerr << "Failed to determine glTF container" << '\n';
-            return false;
-        }
-
+        auto asset = parser.loadGltf(&data, path.parent_path(), gltfOptions);
         if (asset.error() != fastgltf::Error::None) {
             std::cerr << "Failed to load glTF: " << fastgltf::getErrorMessage(asset.error()) << '\n';
             return false;
         }
 
         viewer->asset = std::move(asset.get());
-    }
-
-    // Some buffers are already allocated during parsing of the glTF, like e.g. base64 buffers
-    // through our callback functions. Therefore, we only resize our output buffer vector, but
-    // create our buffer handles later on.
-    auto& buffers = viewer->asset.buffers;
-    viewer->buffers.reserve(buffers.size());
-
-    for (auto& buffer : buffers) {
-        constexpr GLuint bufferUsage = GL_STATIC_DRAW;
-
-        std::visit(fastgltf::visitor {
-            [](auto& arg) {}, // Covers FilePathWithOffset, BufferView, ... which are all not possible
-            [&](fastgltf::sources::Vector& vector) {
-                GLuint glBuffer;
-                glCreateBuffers(1, &glBuffer);
-                glNamedBufferData(glBuffer, static_cast<int64_t>(buffer.byteLength),
-                                  vector.bytes.data(), bufferUsage);
-                viewer->buffers.emplace_back(glBuffer);
-            },
-            [&](fastgltf::sources::CustomBuffer& customBuffer) {
-                // We don't need to do anything special here, the buffer has already been created.
-                viewer->buffers.emplace_back(static_cast<GLuint>(customBuffer.id));
-            },
-        }, buffer.data);
     }
 
     return true;
@@ -359,17 +373,14 @@ bool loadMesh(Viewer* viewer, fastgltf::Mesh& mesh) {
 
     for (auto it = mesh.primitives.begin(); it != mesh.primitives.end(); ++it) {
 		auto* positionIt = it->findAttribute("POSITION");
-		// A mesh primitive is required to hold the POSITION attribute.
-		assert(positionIt != it->attributes.end());
-
-        // We only support indexed geometry.
-        if (!it->indicesAccessor.has_value()) {
-            return false;
-        }
+		assert(positionIt != it->attributes.end()); // A mesh primitive is required to hold the POSITION attribute.
+		assert(it->indicesAccessor.has_value()); // We specify GenerateMeshIndices, so we should always have indices
 
         // Generate the VAO
         GLuint vao = GL_NONE;
         glCreateVertexArrays(1, &vao);
+
+		std::size_t baseColorTexcoordIndex = 0;
 
         // Get the output primitive
         auto index = std::distance(mesh.primitives.begin(), it);
@@ -379,11 +390,19 @@ bool loadMesh(Viewer* viewer, fastgltf::Mesh& mesh) {
         if (it->materialIndex.has_value()) {
             primitive.materialUniformsIndex = it->materialIndex.value() + 1; // Adjust for default material
             auto& material = viewer->asset.materials[it->materialIndex.value()];
-            if (material.pbrData.baseColorTexture.has_value()) {
-                auto& texture = viewer->asset.textures[material.pbrData.baseColorTexture->textureIndex];
+
+			auto& baseColorTexture = material.pbrData.baseColorTexture;
+            if (baseColorTexture.has_value()) {
+                auto& texture = viewer->asset.textures[baseColorTexture->textureIndex];
 				if (!texture.imageIndex.has_value())
 					return false;
                 primitive.albedoTexture = viewer->textures[texture.imageIndex.value()].texture;
+
+				if (baseColorTexture->transform && baseColorTexture->transform->texCoordIndex.has_value()) {
+					baseColorTexcoordIndex = baseColorTexture->transform->texCoordIndex.value();
+				} else {
+					baseColorTexcoordIndex = material.pbrData.baseColorTexture->texCoordIndex;
+				}
             }
         } else {
 			primitive.materialUniformsIndex = 0;
@@ -395,50 +414,47 @@ bool loadMesh(Viewer* viewer, fastgltf::Mesh& mesh) {
             if (!positionAccessor.bufferViewIndex.has_value())
                 continue;
 
+			// Create the vertex buffer for this primitive, and use the accessor tools to copy directly into the mapped buffer.
+			glCreateBuffers(1, &primitive.vertexBuffer);
+			glNamedBufferData(primitive.vertexBuffer, positionAccessor.count * sizeof(Vertex), nullptr, GL_STATIC_DRAW);
+			auto* vertices = static_cast<Vertex*>(glMapNamedBuffer(primitive.vertexBuffer, GL_WRITE_ONLY));
+			fastgltf::iterateAccessorWithIndex<glm::vec3>(asset, positionAccessor, [&](glm::vec3 pos, std::size_t idx) {
+				vertices[idx].position = pos;
+				vertices[idx].uv = glm::vec2();
+			});
+			glUnmapNamedBuffer(primitive.vertexBuffer);
+
             glEnableVertexArrayAttrib(vao, 0);
             glVertexArrayAttribFormat(vao, 0,
-                                      static_cast<GLint>(fastgltf::getNumComponents(positionAccessor.type)),
-                                      fastgltf::getGLComponentType(positionAccessor.componentType),
+                                      3, GL_FLOAT,
                                       GL_FALSE, 0);
             glVertexArrayAttribBinding(vao, 0, 0);
 
-            auto& positionView = asset.bufferViews[positionAccessor.bufferViewIndex.value()];
-            auto offset = positionView.byteOffset + positionAccessor.byteOffset;
-            if (positionView.byteStride.has_value()) {
-                glVertexArrayVertexBuffer(vao, 0, viewer->buffers[positionView.bufferIndex],
-                                          static_cast<GLintptr>(offset),
-                                          static_cast<GLsizei>(positionView.byteStride.value()));
-            } else {
-                glVertexArrayVertexBuffer(vao, 0, viewer->buffers[positionView.bufferIndex],
-                                          static_cast<GLintptr>(offset),
-                                          static_cast<GLsizei>(fastgltf::getElementByteSize(positionAccessor.type, positionAccessor.componentType)));
-            }
+			glVertexArrayVertexBuffer(vao, 0, primitive.vertexBuffer,
+									  0, sizeof(Vertex));
         }
 
-        {
+		auto texcoordAttribute = std::string("TEXCOORD_") + std::to_string(baseColorTexcoordIndex);
+        if (const auto* texcoord = it->findAttribute(texcoordAttribute); texcoord != it->attributes.end()) {
             // Tex coord
-			auto texcoord0 = it->findAttribute("TEXCOORD_0");
-			auto& texCoordAccessor = asset.accessors[texcoord0->second];
+			auto& texCoordAccessor = asset.accessors[texcoord->second];
             if (!texCoordAccessor.bufferViewIndex.has_value())
                 continue;
 
-            glEnableVertexArrayAttrib(vao, 1);
-            glVertexArrayAttribFormat(vao, 1, static_cast<GLint>(fastgltf::getNumComponents(texCoordAccessor.type)),
-                                      fastgltf::getGLComponentType(texCoordAccessor.componentType),
+			auto* vertices = static_cast<Vertex*>(glMapNamedBuffer(primitive.vertexBuffer, GL_WRITE_ONLY));
+			fastgltf::iterateAccessorWithIndex<glm::vec2>(asset, texCoordAccessor, [&](glm::vec2 uv, std::size_t idx) {
+				vertices[idx].uv = uv;
+			});
+			glUnmapNamedBuffer(primitive.vertexBuffer);
+
+			glEnableVertexArrayAttrib(vao, 1);
+            glVertexArrayAttribFormat(vao, 1,
+									  2, GL_FLOAT,
                                       GL_FALSE, 0);
             glVertexArrayAttribBinding(vao, 1, 1);
 
-            auto& texCoordView = asset.bufferViews[texCoordAccessor.bufferViewIndex.value()];
-            auto offset = texCoordView.byteOffset + texCoordAccessor.byteOffset;
-            if (texCoordView.byteStride.has_value()) {
-                glVertexArrayVertexBuffer(vao, 1, viewer->buffers[texCoordView.bufferIndex],
-                                          static_cast<GLintptr>(offset),
-                                          static_cast<GLsizei>(texCoordView.byteStride.value()));
-            } else {
-                glVertexArrayVertexBuffer(vao, 1, viewer->buffers[texCoordView.bufferIndex],
-                                          static_cast<GLintptr>(offset),
-                                          static_cast<GLsizei>(fastgltf::getElementByteSize(texCoordAccessor.type, texCoordAccessor.componentType)));
-            }
+			glVertexArrayVertexBuffer(vao, 1, primitive.vertexBuffer,
+									  offsetof(Vertex, uv), sizeof(Vertex));
         }
 
         // Generate the indirect draw command
@@ -446,16 +462,22 @@ bool loadMesh(Viewer* viewer, fastgltf::Mesh& mesh) {
         draw.instanceCount = 1;
         draw.baseInstance = 0;
         draw.baseVertex = 0;
+		draw.firstIndex = 0;
 
-        auto& indices = asset.accessors[it->indicesAccessor.value()];
-        if (!indices.bufferViewIndex.has_value())
+        auto& indexAccessor = asset.accessors[it->indicesAccessor.value()];
+        if (!indexAccessor.bufferViewIndex.has_value())
             return false;
-        draw.count = static_cast<uint32_t>(indices.count);
+        draw.count = static_cast<std::uint32_t>(indexAccessor.count);
 
-        auto& indicesView = asset.bufferViews[indices.bufferViewIndex.value()];
-        draw.firstIndex = static_cast<uint32_t>(indices.byteOffset + indicesView.byteOffset) / fastgltf::getElementByteSize(indices.type, indices.componentType);
-        primitive.indexType = getGLComponentType(indices.componentType);
-        glVertexArrayElementBuffer(vao, viewer->buffers[indicesView.bufferIndex]);
+		// Create the index buffer and copy 32-bit indices into it.
+		glCreateBuffers(1, &primitive.indexBuffer);
+		glNamedBufferData(primitive.indexBuffer, static_cast<GLsizeiptr>(indexAccessor.count * sizeof(std::uint32_t)), nullptr, GL_STATIC_DRAW);
+		auto* indices = static_cast<std::uint32_t*>(glMapNamedBuffer(primitive.indexBuffer, GL_WRITE_ONLY));
+		fastgltf::copyFromAccessor<std::uint32_t>(asset, indexAccessor, indices);
+		glUnmapNamedBuffer(primitive.indexBuffer);
+
+        primitive.indexType = GL_UNSIGNED_INT;
+        glVertexArrayElementBuffer(vao, primitive.indexBuffer);
     }
 
     // Create the buffer holding all of our primitive structs.
@@ -488,7 +510,7 @@ bool loadImage(Viewer* viewer, fastgltf::Image& image) {
             glTextureSubImage2D(texture, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, data);
             stbi_image_free(data);
         },
-        [&](fastgltf::sources::Vector& vector) {
+        [&](fastgltf::sources::Array& vector) {
             int width, height, nrChannels;
             unsigned char *data = stbi_load_from_memory(vector.bytes.data(), static_cast<int>(vector.bytes.size()), &width, &height, &nrChannels, 4);
             glTextureStorage2D(texture, getLevelCount(width, height), GL_RGBA8, width, height);
@@ -504,7 +526,7 @@ bool loadImage(Viewer* viewer, fastgltf::Image& image) {
                 // We only care about VectorWithMime here, because we specify LoadExternalBuffers, meaning
                 // all buffers are already loaded into a vector.
                 [](auto& arg) {},
-                [&](fastgltf::sources::Vector& vector) {
+                [&](fastgltf::sources::Array& vector) {
                     int width, height, nrChannels;
                     unsigned char* data = stbi_load_from_memory(vector.bytes.data() + bufferView.byteOffset, static_cast<int>(bufferView.byteLength), &width, &height, &nrChannels, 4);
                     glTextureStorage2D(texture, getLevelCount(width, height), GL_RGBA8, width, height);
@@ -534,7 +556,44 @@ bool loadMaterial(Viewer* viewer, fastgltf::Material& material) {
     return true;
 }
 
-void drawMesh(Viewer* viewer, size_t meshIndex, glm::mat4 matrix) {
+bool loadCamera(Viewer* viewer, fastgltf::Camera& camera) {
+	// The following matrix math is for the projection matrices as defined by the glTF spec:
+	// https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#projection-matrices
+	std::visit(fastgltf::visitor {
+		[&](fastgltf::Camera::Perspective& perspective) {
+			glm::mat4x4 mat(0.0f);
+
+			assert(viewer->windowDimensions[0] != 0 && viewer->windowDimensions[1] != 0);
+			auto aspectRatio = perspective.aspectRatio.value_or(
+				static_cast<float>(viewer->windowDimensions[0]) / static_cast<float>(viewer->windowDimensions[1]));
+			mat[0][0] = 1.f / (aspectRatio * tan(0.5f * perspective.yfov));
+			mat[1][1] = 1.f / (tan(0.5f * perspective.yfov));
+			mat[2][3] = -1;
+
+			if (perspective.zfar.has_value()) {
+				// Finite projection matrix
+				mat[2][2] = (*perspective.zfar + perspective.znear) / (perspective.znear - *perspective.zfar);
+				mat[3][2] = (2 * *perspective.zfar * perspective.znear) / (perspective.znear - *perspective.zfar);
+			} else {
+				// Infinite projection matrix
+				mat[2][2] = -1;
+				mat[3][2] = -2 * perspective.znear;
+			}
+			viewer->cameras.emplace_back(mat);
+		},
+		[&](fastgltf::Camera::Orthographic& orthographic) {
+			glm::mat4x4 mat(1.0f);
+			mat[0][0] = 1.f / orthographic.xmag;
+			mat[1][1] = 1.f / orthographic.ymag;
+			mat[2][2] = 2.f / (orthographic.znear - orthographic.zfar);
+			mat[3][2] = (orthographic.zfar + orthographic.znear) / (orthographic.znear - orthographic.zfar);
+			viewer->cameras.emplace_back(mat);
+		},
+	}, camera.camera);
+	return true;
+}
+
+void drawMesh(Viewer* viewer, std::size_t meshIndex, glm::mat4 matrix) {
     auto& mesh = viewer->meshes[meshIndex];
 
     glBindBuffer(GL_DRAW_INDIRECT_BUFFER, mesh.drawsBuffer);
@@ -543,18 +602,41 @@ void drawMesh(Viewer* viewer, size_t meshIndex, glm::mat4 matrix) {
 
     for (auto i = 0U; i < mesh.primitives.size(); ++i) {
         auto& prim = mesh.primitives[i];
+		auto& gltfPrimitive = viewer->asset.meshes[meshIndex].primitives[i];
 
-        auto& material = viewer->materialBuffers[prim.materialUniformsIndex];
+		std::size_t materialIndex;
+		auto& mappings = gltfPrimitive.mappings;
+		if (!mappings.empty() && mappings[viewer->materialVariant].has_value()) {
+			materialIndex = mappings[viewer->materialVariant].value() + 1; // Adjust for default material
+		} else {
+			materialIndex = prim.materialUniformsIndex;
+		}
+
+        auto& material = viewer->materialBuffers[materialIndex];
         glBindTextureUnit(0, prim.albedoTexture);
         glBindBufferBase(GL_UNIFORM_BUFFER, 0, material);
         glBindVertexArray(prim.vertexArray);
+
+		// Update texture transform uniforms
+		glUniform2f(viewer->uvOffsetUniform, 0, 0);
+		glUniform2f(viewer->uvScaleUniform, 1.f, 1.f);
+		glUniform1f(viewer->uvRotationUniform, 0);
+		if (materialIndex != 0) {
+			auto& gltfMaterial = viewer->asset.materials[materialIndex - 1];
+			if (gltfMaterial.pbrData.baseColorTexture.has_value() && gltfMaterial.pbrData.baseColorTexture->transform) {
+				auto& transform = gltfMaterial.pbrData.baseColorTexture->transform;
+				glUniform2f(viewer->uvOffsetUniform, transform->uvOffset[0], transform->uvOffset[1]);
+				glUniform2f(viewer->uvScaleUniform, transform->uvScale[0], transform->uvScale[1]);
+				glUniform1f(viewer->uvRotationUniform, static_cast<float>(transform->rotation));
+			}
+		}
 
         glDrawElementsIndirect(prim.primitiveType, prim.indexType,
                                reinterpret_cast<const void*>(i * sizeof(Primitive)));
     }
 }
 
-void drawNode(Viewer* viewer, size_t nodeIndex, glm::mat4 matrix) {
+void drawNode(Viewer* viewer, std::size_t nodeIndex, glm::mat4 matrix) {
     auto& node = viewer->asset.nodes[nodeIndex];
     matrix = getTransformMatrix(node, matrix);
 
@@ -565,6 +647,37 @@ void drawNode(Viewer* viewer, size_t nodeIndex, glm::mat4 matrix) {
     for (auto& child : node.children) {
         drawNode(viewer, child, matrix);
     }
+}
+
+void updateCameraNodes(Viewer* viewer, std::vector<fastgltf::Node*>& cameraNodes, std::size_t nodeIndex) {
+	// This function recursively traverses the node hierarchy starting with the node at nodeIndex
+	// to find any nodes holding cameras.
+	auto& node = viewer->asset.nodes[nodeIndex];
+
+	if (node.cameraIndex.has_value()) {
+		if (node.name.empty()) {
+			// Always have a non-empty string for the ImGui UI
+			node.name = std::string("Camera ") + std::to_string(cameraNodes.size());
+		}
+		cameraNodes.emplace_back(&node);
+	}
+
+	for (auto& child : node.children) {
+		updateCameraNodes(viewer, cameraNodes, child);
+	}
+}
+
+void getCameraViewMatrix(Viewer* viewer, std::vector<fastgltf::Node*>& cameraNodes, std::size_t nodeIndex, glm::mat4 matrix) {
+	auto& node = viewer->asset.nodes[nodeIndex];
+	matrix = getTransformMatrix(node, matrix);
+
+	if (node.cameraIndex.has_value() && &node == cameraNodes[*viewer->cameraIndex]) {
+		viewer->viewMatrix = matrix;
+	}
+
+	for (auto& child : node.children) {
+		getCameraViewMatrix(viewer, cameraNodes, child, matrix);
+	}
 }
 
 int main(int argc, char* argv[]) {
@@ -597,7 +710,15 @@ int main(int argc, char* argv[]) {
     glfwSetCursorPosCallback(window, cursorCallback);
     glfwSetWindowSizeCallback(window, windowSizeCallback);
 
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    // glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGui::StyleColorsDark();
+
+	// All of our callbacks need to be set before calling this so that it correctly chains them
+	ImGui_ImplGlfw_InitForOpenGL(window, true);
+	ImGui_ImplOpenGL3_Init();
 
     if (!gladLoadGL(glfwGetProcAddress)) {
         std::cerr << "Failed to initialize OpenGL context." << '\n';
@@ -648,7 +769,14 @@ int main(int argc, char* argv[]) {
         glDeleteShader(vertexShader);
     }
 
-    // Load the glTF file
+	{
+		// We just emulate the initial sizing of the window with a manual call.
+		int width, height;
+		glfwGetWindowSize(window, &width, &height);
+		windowSizeCallback(window, width, height);
+	}
+
+	// Load the glTF file
     auto start = std::chrono::high_resolution_clock::now();
     if (!loadGltf(&viewer, gltfFile)) {
         std::cerr << "Failed to parse glTF" << '\n';
@@ -672,7 +800,11 @@ int main(int argc, char* argv[]) {
     for (auto& mesh : asset.meshes) {
         loadMesh(&viewer, mesh);
     }
-    auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start);
+	// Loading the cameras (possibly) requires knowing the viewport size, which we get using glfwGetWindowSize above.
+	for (auto& camera : asset.cameras) {
+		loadCamera(&viewer, camera);
+	}
+	auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start);
     std::cout << "Loaded glTF file in " << diff.count() << "ms." << '\n';
 
     // Create the material uniform buffer
@@ -685,18 +817,43 @@ int main(int argc, char* argv[]) {
 
     viewer.modelMatrixUniform = glGetUniformLocation(program, "modelMatrix");
     viewer.viewProjectionMatrixUniform = glGetUniformLocation(program, "viewProjectionMatrix");
+	viewer.uvOffsetUniform = glGetUniformLocation(program, "uvOffset");
+	viewer.uvScaleUniform = glGetUniformLocation(program, "uvScale");
+	viewer.uvRotationUniform = glGetUniformLocation(program, "uvRotation");
     glUseProgram(program);
-
-    {
-        // We just emulate the initial sizing of the window with a manual call.
-        int width, height;
-        glfwGetWindowSize(window, &width, &height);
-        windowSizeCallback(window, width, height);
-    }
 
     glEnable(GL_BLEND);
     glEnable(GL_MULTISAMPLE);
     glEnable(GL_DEPTH_TEST);
+
+	auto& sceneIndex = viewer.sceneIndex = viewer.asset.defaultScene.value_or(0);
+
+	// Give every scene a readable name, if not yet available
+	for (std::size_t i = 0; i < asset.scenes.size(); ++i) {
+		if (!asset.scenes[i].name.empty())
+			continue;
+		asset.scenes[i].name = std::string("Scene ") + std::to_string(i);
+	}
+
+	// We keep a list of all camera nodes present in the current scene.
+	// When the cameraIndex has no value (because none is selected or there were none defined by the glTF),
+	// a default free camera should be used.
+	std::vector<fastgltf::Node*> cameraNodes;
+	if (!viewer.asset.scenes.empty() && sceneIndex < viewer.asset.scenes.size()) {
+		auto& scene = viewer.asset.scenes[sceneIndex];
+		for (auto& node: scene.nodeIndices) {
+			updateCameraNodes(&viewer, cameraNodes, node);
+		}
+	}
+
+	// Set the initial direction (incl. pitch and yaw) and position of the camera.
+	viewer.position = glm::vec3(2.f, 2.f, 2.f);
+	viewer.direction = -viewer.position;
+	{
+		auto len = std::sqrt(std::pow(viewer.direction.x, 2) + std::pow(viewer.direction.z, 2));
+		viewer.pitch = glm::degrees(std::tan(viewer.direction.y / len));
+		viewer.yaw = -135.f;
+	}
 
     viewer.lastFrame = static_cast<float>(glfwGetTime());
     while (glfwWindowShouldClose(window) != GLFW_TRUE) {
@@ -710,27 +867,117 @@ int main(int argc, char* argv[]) {
         // Updates the acceleration vector and direction vectors.
         glfwPollEvents();
 
-        // Factor the deltaTime into the amount of acceleration
-        viewer.velocity += (viewer.accelerationVector * 50.0f) * viewer.deltaTime;
-        // Lerp the velocity to 0, adding deceleration.
-        viewer.velocity = viewer.velocity + (2.0f * viewer.deltaTime) * (glm::vec3(0.0f) - viewer.velocity);
-        // Add the velocity into the position
-        viewer.position += viewer.velocity * viewer.deltaTime;
-        viewer.viewMatrix = glm::lookAt(viewer.position, viewer.position + viewer.direction, glm::vec3(0.0f, 1.0f, 0.0f));
-        updateCameraMatrix(&viewer);
+		ImGui_ImplOpenGL3_NewFrame();
+		ImGui_ImplGlfw_NewFrame();
+		ImGui::NewFrame();
+
+		if (ImGui::Begin("gl_viewer", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
+			auto& name = asset.scenes[sceneIndex].name;
+			if (ImGui::BeginCombo("Scene", name.c_str(), ImGuiComboFlags_None)) {
+				for (std::size_t i = 0; i < asset.scenes.size(); ++i) {
+					const bool isSelected = i == sceneIndex;
+					if (ImGui::Selectable(asset.scenes[i].name.c_str(), isSelected)) {
+						sceneIndex = i;
+
+						// Reset & update the camera nodes array
+						cameraNodes.clear();
+						auto& scene = viewer.asset.scenes[sceneIndex];
+						for (auto& node : scene.nodeIndices) {
+							updateCameraNodes(&viewer, cameraNodes, node);
+						}
+					}
+					if (isSelected)
+						ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+
+			if (ImGui::BeginCombo("Camera",
+								  viewer.cameraIndex.has_value() ? cameraNodes[*viewer.cameraIndex]->name.c_str() : "Default",
+								  ImGuiComboFlags_None)) {
+				{
+					// Default camera entry
+					const bool isSelected = !viewer.cameraIndex.has_value();
+					if (ImGui::Selectable("Default", isSelected)) {
+						viewer.cameraIndex.reset();
+					}
+					if (isSelected) {
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+
+				for (std::size_t i = 0; i < cameraNodes.size(); ++i) {
+					const bool isSelected = i == *viewer.cameraIndex;
+					if (ImGui::Selectable(cameraNodes[i]->name.c_str(), isSelected)) {
+						viewer.cameraIndex = i;
+					}
+					if (isSelected) {
+						ImGui::SetItemDefaultFocus();
+					}
+				}
+				ImGui::EndCombo();
+			}
+
+			ImGui::BeginDisabled(asset.materialVariants.empty());
+			const auto currentVariantName = asset.materialVariants.empty()
+				? "N/A"
+				: asset.materialVariants[viewer.materialVariant].c_str();
+			if (ImGui::BeginCombo("Variant", currentVariantName, ImGuiComboFlags_None)) {
+				for (std::size_t i = 0; i < asset.materialVariants.size(); ++i) {
+					const bool isSelected = i == viewer.materialVariant;
+					if (ImGui::Selectable(asset.materialVariants[i].c_str(), isSelected))
+						viewer.materialVariant = i;
+					if (isSelected)
+						ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::EndDisabled();
+		}
+		ImGui::End();
 
         glClearColor(0.1f, 0.2f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-		std::size_t sceneIndex = 0;
-		if (viewer.asset.defaultScene.has_value())
-			sceneIndex = viewer.asset.defaultScene.value();
-        auto& scene = viewer.asset.scenes[sceneIndex];
-        for (auto& node : scene.nodeIndices) {
-            drawNode(&viewer, node, glm::mat4(1.0f));
-        }
+		if (!asset.scenes.empty() && sceneIndex < asset.scenes.size()) {
+			auto& scene = asset.scenes[sceneIndex];
+
+			// Update the camera view and projection matrices
+			if (viewer.cameraIndex.has_value()) {
+				for (auto& sceneNode: scene.nodeIndices) {
+					getCameraViewMatrix(&viewer, cameraNodes, sceneNode, glm::mat4(1.0f));
+				}
+
+				viewer.viewMatrix = glm::affineInverse(viewer.viewMatrix);
+				viewer.projectionMatrix = viewer.cameras[viewer.cameraIndex.value()];
+			} else {
+				// Factor the deltaTime into the amount of acceleration
+				viewer.velocity += (viewer.accelerationVector * 50.0f) * viewer.deltaTime;
+				// Lerp the velocity to 0, adding deceleration.
+				viewer.velocity = viewer.velocity + (2.0f * viewer.deltaTime) * (glm::vec3(0.0f) - viewer.velocity);
+				// Add the velocity into the position
+				viewer.position += viewer.velocity * viewer.deltaTime;
+				viewer.viewMatrix = glm::lookAt(viewer.position, viewer.position + viewer.direction,
+												glm::vec3(0.0f, 1.0f, 0.0f));
+
+				auto aspectRatio = static_cast<float>(viewer.windowDimensions[0]) / static_cast<float>(viewer.windowDimensions[1]);
+				viewer.projectionMatrix = glm::perspective(glm::radians(75.0f),
+														   aspectRatio,
+															0.01f, 1000.0f);
+			}
+
+			updateCameraMatrix(&viewer);
+
+			for (auto& node: scene.nodeIndices) {
+				drawNode(&viewer, node, glm::mat4(1.0f));
+			}
+		}
+
+		// Render ImGui
+		ImGui::Render();
+		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glfwSwapBuffers(window);
     }
@@ -740,12 +987,17 @@ int main(int argc, char* argv[]) {
 
         for (auto& prim : mesh.primitives) {
             glDeleteVertexArrays(1, &prim.vertexArray);
+			glDeleteBuffers(1, &prim.indexBuffer);
+			glDeleteBuffers(1, &prim.vertexBuffer);
         }
     }
 
     glDeleteProgram(program);
-    glDeleteBuffers(static_cast<GLint>(viewer.buffers.size()), viewer.buffers.data());
 
-    glfwDestroyWindow(window);
+	ImGui_ImplOpenGL3_Shutdown();
+	ImGui_ImplGlfw_Shutdown();
+	ImGui::DestroyContext();
+
+	glfwDestroyWindow(window);
     glfwTerminate();
 }

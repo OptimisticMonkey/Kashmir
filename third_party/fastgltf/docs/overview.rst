@@ -4,11 +4,11 @@ Overview
 
 .. contents:: Table of Contents
 
-**fastgltf** is a speed and usability focused glTF 2.0 parser written in modern C++17 with minimal dependencies.
+**fastgltf** is a speed and usability focused glTF 2.0 library written in modern C++17 with minimal dependencies.
 It uses SIMD in various areas to decrease the time the application spends parsing and loading glTF data.
 By taking advantage of modern C++17 (and optionally C++20) it also provides easy and safe access to the properties and data.
 
-The parser supports the entirety of glTF 2.0 specification, including many extensions.
+The library supports the entirety of glTF 2.0 specification, including many extensions.
 By default, fastgltf will only do the absolute minimum to work with a glTF model.
 However, it brings many additional features to ease working with the data,
 including accessor tools, the ability to directly write to mapped GPU buffers, and decomposing transform matrices.
@@ -42,7 +42,7 @@ glTF libraries.
    * - glTF 2.0 writing
      - ✔️
      - ✔️
-     - ❌
+     - ✔️
    * - Extension support
      - ✔️
      - 🟡¹
@@ -88,15 +88,11 @@ It does not provide any mechanism for controlling all the heap allocations the l
 You can read more about the accessor utilities from fastgltf :ref:`here <accessor-tools>`.
 
 fastgltf follows C++'s concept of "you don't pay for what you don't use" by only doing the absolute minimum by default.
-Without specifying any options, fastgltf will only parse the specified parts of the glTF JSON.
-For buffers and images, fastgltf will by default only either give you buffers,
-when the buffer or image data is embedded within the glTF, or just the plain old URIs.
-Still, fastgltf offers various options that will let the library load buffers and images into memory,
-which can be controlled with the memory map/unmap callbacks.
-These can also be used for mapping GPU buffers so that fastgltf will write or decode base64 data directly into GPU memory.
+Without specifying any options, fastgltf will only parse the glTF JSON.
+For buffers and images, fastgltf will by default only either give you a std::vector, when the data is embedded within the glTF, or just plain old URIs.
+While fastgltf only does the minimum by default, it provides a lot of extra features that can be bundled together.
 
-By using modern C++ features, the code that reads data and properties from the glTF becomes simpler and vastly more descriptive,
-which is a big aspect of guaranteeing code-correctness.
+By using modern C++ features, the code that reads data and properties from the glTF becomes simpler and vastly more descriptive, guaranteeing code-correctness.
 A big factor for this improvement is the use of types which enforce certain properties about the data, like e.g. ``std::variant`` or ``std::optional``.
 Compared with tinygltf, where, for example, optional values are simply represented by a boolean or a ``-1`` for indices, this is a big improvement.
 
@@ -122,7 +118,7 @@ The following snippet illustrates how to use fastgltf to load a glTF file.
 
 .. code:: c++
 
-   #include <fastgltf/parser.hpp>
+   #include <fastgltf/core.hpp>
    #include <fastgltf/types.hpp>
 
    void load(std::filesystem::path path) {
@@ -137,10 +133,10 @@ The following snippet illustrates how to use fastgltf to load a glTF file.
        fastgltf::GltfDataBuffer data;
        data.loadFromFile(path);
 
-       // This loads the glTF file into the gltf object and parses the JSON. For GLB files, use
-       // Parser::loadBinaryGLTF instead.
-       // You can detect the type of glTF using fastgltf::determineGltfFileType.
-       auto asset = parser.loadGLTF(&data, path.parent_path(), fastgltf::Options::None);
+       // This loads the glTF file into the gltf object and parses the JSON.
+       // It automatically detects whether this is a JSON-based or binary glTF.
+       // If you know the type, you can also use loadGltfJson or loadGltfBinary.
+       auto asset = parser.loadGltf(&data, path.parent_path(), fastgltf::Options::None);
        if (auto error = asset.error(); error != fastgltf::Error::None) {
            // Some error occurred while reading the buffer, parsing the JSON, or validating the data.
        }
@@ -164,6 +160,19 @@ All the nodes, meshes, buffers, textures, ... can now be accessed through the ``
 References in between objects are done with a single ``size_t``,
 which is used to index into the various vectors in the asset.
 
+.. _examples:
+
+Examples and real-world usage
+=============================
+
+You can find some examples in the `examples/` directory of this repository on how to use fastgltf in a 3D renderer to load glTF files.
+Additionally, this is a list of some interesting projects using fastgltf:
+
+- `Fwog <https://github.com/JuanDiegoMontoya/Fwog>`_: The examples of this modern OpenGL 4.6 abstraction make use of fastgltf.
+- `wad2gltf <https://github.com/DethRaid/wad2gltf>`_: A WAD to glTF converter
+- `Castor3D <https://github.com/DragonJoker/Castor3D>`_: A multi-OS 3D engine
+- `Raz <https://github.com/Razakhel/RaZ>`_: A modern & multiplatform 3D game engine in C++17
+- `vkguide <https://vkguide.dev>`_: A modern Vulkan tutorial
 
 .. _accessor-tools:
 
@@ -198,25 +207,25 @@ However, to give a quick overview this is a simple example of how to load the in
 Performance
 ===========
 
-.. _spreadsheet-link: https://docs.google.com/spreadsheets/d/1ocdHGoty-rF0N46ZlAlswzcPHVRsqG_tncy8paD3iMY/edit?usp=sharing
-.. _two-cylinder-engine: https://github.com/KhronosGroup/glTF-Sample-Models/tree/master/2.0/2CylinderEngine
-.. _bistro: https://developer.nvidia.com/orca/amazon-lumberyard-bistro
-
 In this chapter, I'll show some graphs on how fastgltf compares to the two most used glTF libraries, cgltf and tinygltf.
 I've disabled loading of images and buffers to only compare the JSON parsing and deserialization of the glTF data.
-The values and the graphs themselves can be found in `this spreadsheet <spreadsheet-link>`_.
-These numbers were benchmarked using Catch2's benchmark tool on a Ryzen 5800X (with AVX2) with 32GB of RAM using Clang 16,
+The values and the graphs themselves can be found in `this spreadsheet <https://docs.google.com/spreadsheets/d/1ocdHGoty-rF0N46ZlAlswzcPHVRsqG_tncy8paD3iMY/edit?usp=sharing>`_.
+These numbers were benchmarked using Catch2's benchmark tool on a Ryzen 5800X (with AVX2) with 32GB of RAM using Clang 17,
 as Clang showed a significant performance improvement over MSVC in every test.
 
 First, I compared the performance with embedded buffers that are encoded with base64.
-This uses the `2CylinderEngine asset <two-cylinder-engine>`_ which contains a 1.7MB embedded buffer.
+This uses the `2CylinderEngine asset <https://github.com/KhronosGroup/glTF-Sample-Models/tree/master/2.0/2CylinderEngine>`_ which contains a 1.7MB embedded buffer.
 fastgltf includes an optimised base64 decoding algorithm that can take advantage of AVX2, SSE4, and ARM Neon.
-With this asset, fastgltf is **20.56 times faster** than tinygltf using RapidJSON and **6.5 times faster** than cgltf.
+With this asset, fastgltf is **24.56 times faster** than tinygltf using RapidJSON and **7.4 times faster** than cgltf.
 
-.. image:: https://cdn.discordapp.com/attachments/442748131898032138/1088470860333060207/Mean_time_parsing_2CylinderEngine_ms_8.png
+.. raw:: html
 
-`Amazon's Bistro <bistro>`_ (converted to glTF 2.0 using Blender) is another excellent test subject, as it's a 148k line long JSON.
+   <iframe width="806" height="503" seamless frameborder="0" scrolling="no" src="https://docs.google.com/spreadsheets/d/e/2PACX-1vRMHyL5fZBZUIG2ltla4fSqSUA2knyogxSix2LoDWlsT-s0Yz5-DWP0S89YwjCf2IY8vo0bHcP20mhx/pubchart?oid=1935631180&amp;format=interactive"></iframe>
+
+`Amazon's Bistro <https://developer.nvidia.com/orca/amazon-lumberyard-bistro>`_ (converted to glTF 2.0 using Blender) is another excellent test subject, as it's a 148k line long JSON.
 This shows the raw deserialization speed of all the parsers.
-In this case fastgltf is **2.1 times faster** than tinygltf and **5.6 times faster** than cgltf.
+In this case fastgltf is **1.4 times faster** than tinygltf and **5 times faster** than cgltf.
 
-.. image:: https://cdn.discordapp.com/attachments/442748131898032138/1088470983024840754/Bistro_load_from_memory_without_images_and_buffer_load_1.png
+.. raw:: html
+
+   <iframe width="806" height="503" seamless frameborder="0" scrolling="no" src="https://docs.google.com/spreadsheets/d/e/2PACX-1vRMHyL5fZBZUIG2ltla4fSqSUA2knyogxSix2LoDWlsT-s0Yz5-DWP0S89YwjCf2IY8vo0bHcP20mhx/pubchart?oid=1001009345&amp;format=interactive"></iframe>

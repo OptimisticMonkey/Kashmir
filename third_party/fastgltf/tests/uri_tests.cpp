@@ -1,7 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <fastgltf/types.hpp>
-#include <fastgltf/parser.hpp>
+#include <fastgltf/core.hpp>
 
 #include "gltf_path.hpp"
 
@@ -66,9 +66,10 @@ TEST_CASE("Test generic URIs", "[uri-tests]") {
 }
 
 TEST_CASE("Test percent decoding", "[uri-tests]") {
-    std::string test = "%22 %25";
+	// All reserved characters as per RFC 3986 section 2.2 Reserved Characters (January 2005)
+    std::string test = "%20%21%22%23%24%25%26%27%28%29%2A%2B%2C%2F%3A%3B%3D%3F%40%5B%5D";
     fastgltf::URI::decodePercents(test);
-    REQUIRE(test == "\" %");
+    REQUIRE(test == " !\"#$%&'()*+,/:;=?@[]");
 }
 
 TEST_CASE("Test data URI parsing", "[uri-tests]") {
@@ -108,12 +109,13 @@ TEST_CASE("Validate URI copying/moving", "[uri-tests]") {
 TEST_CASE("Validate escaped/percent-encoded URI", "[uri-tests]") {
 	const std::string_view gltfString = R"({"images": [{"uri": "grande_sph\u00E8re.png"}]})";
 	fastgltf::GltfDataBuffer dataBuffer;
-	dataBuffer.copyBytes((uint8_t*) gltfString.data(), gltfString.size());
+	dataBuffer.copyBytes(reinterpret_cast<const uint8_t*>(gltfString.data()), gltfString.size());
 
 	fastgltf::Parser parser;
-	auto asset = parser.loadGLTF(&dataBuffer, "", fastgltf::Options::DontRequireValidAssetMember);
+	auto asset = parser.loadGltfJson(&dataBuffer, "", fastgltf::Options::DontRequireValidAssetMember);
 	REQUIRE(asset.error() == fastgltf::Error::None);
 
+	REQUIRE(asset->images.size() == 1);
 	auto escaped = std::get<fastgltf::sources::URI>(asset->images.front().data);
 
 	// This only tests wether the default ctor of fastgltf::URI can handle percent-encoding correctly.
@@ -129,7 +131,7 @@ TEST_CASE("Test percent-encoded URIs in glTF", "[uri-tests]") {
 	REQUIRE(jsonData.loadFromFile(boxWithSpaces / "Box With Spaces.gltf"));
 
 	fastgltf::Parser parser;
-	auto asset = parser.loadGLTF(&jsonData, boxWithSpaces);
+	auto asset = parser.loadGltfJson(&jsonData, boxWithSpaces);
 	REQUIRE(asset.error() == fastgltf::Error::None);
 	REQUIRE(fastgltf::validate(asset.get()) == fastgltf::Error::None);
 
