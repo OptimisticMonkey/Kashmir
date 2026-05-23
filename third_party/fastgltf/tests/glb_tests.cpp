@@ -2,7 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <fastgltf/parser.hpp>
+#include <fastgltf/core.hpp>
 #include <fastgltf/types.hpp>
 #include "gltf_path.hpp"
 
@@ -13,7 +13,7 @@ TEST_CASE("Load basic GLB file", "[gltf-loader]") {
     REQUIRE(jsonData.loadFromFile(folder / "Box.glb"));
 
     SECTION("Load basic Box.glb") {
-        auto asset = parser.loadBinaryGLTF(&jsonData, folder, fastgltf::Options::None, fastgltf::Category::Buffers);
+        auto asset = parser.loadGltfBinary(&jsonData, folder, fastgltf::Options::None, fastgltf::Category::Buffers);
         REQUIRE(asset.error() == fastgltf::Error::None);
 		REQUIRE(fastgltf::validate(asset.get()) == fastgltf::Error::None);
 
@@ -28,14 +28,14 @@ TEST_CASE("Load basic GLB file", "[gltf-loader]") {
     }
 
     SECTION("Load basic Box.glb and load buffers") {
-        auto asset = parser.loadBinaryGLTF(&jsonData, folder, fastgltf::Options::LoadGLBBuffers, fastgltf::Category::Buffers);
+        auto asset = parser.loadGltfBinary(&jsonData, folder, fastgltf::Options::LoadGLBBuffers, fastgltf::Category::Buffers);
         REQUIRE(asset.error() == fastgltf::Error::None);
 		REQUIRE(fastgltf::validate(asset.get()) == fastgltf::Error::None);
 
         REQUIRE(asset->buffers.size() == 1);
 
         auto& buffer = asset->buffers.front();
-        auto* bufferVector = std::get_if<fastgltf::sources::Vector>(&buffer.data);
+        auto* bufferVector = std::get_if<fastgltf::sources::Array>(&buffer.data);
         REQUIRE(bufferVector != nullptr);
         REQUIRE(!bufferVector->bytes.empty());
         REQUIRE(static_cast<uint64_t>(bufferVector->bytes.size() - buffer.byteLength) < 3);
@@ -51,7 +51,7 @@ TEST_CASE("Load basic GLB file", "[gltf-loader]") {
         fastgltf::GltfDataBuffer byteBuffer;
         REQUIRE(byteBuffer.fromByteView(bytes.data(), length, length + fastgltf::getGltfBufferPadding()));
 
-        auto asset = parser.loadBinaryGLTF(&byteBuffer, folder, fastgltf::Options::LoadGLBBuffers, fastgltf::Category::Buffers);
+        auto asset = parser.loadGltfBinary(&byteBuffer, folder, fastgltf::Options::LoadGLBBuffers, fastgltf::Category::Buffers);
         REQUIRE(asset.error() == fastgltf::Error::None);
     }
 }

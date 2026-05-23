@@ -6,7 +6,7 @@
 
 #include "simdjson.h"
 
-#include <fastgltf/parser.hpp>
+#include <fastgltf/core.hpp>
 #include <fastgltf/base64.hpp>
 #include "gltf_path.hpp"
 
@@ -76,7 +76,7 @@ void setTinyGLTFCallbacks(tinygltf::TinyGLTF& gltf) {
 #include <assimp/Base64.hpp>
 #endif
 
-std::vector<uint8_t> readFileAsBytes(std::filesystem::path path) {
+std::vector<uint8_t> readFileAsBytes(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::ate | std::ios::binary);
     if (!file.is_open())
         throw std::runtime_error(std::string { "Failed to open file: " } + path.string());
@@ -107,7 +107,7 @@ TEST_CASE("Benchmark loading of NewSponza", "[gltf-benchmark]") {
     REQUIRE(jsonData->fromByteView(bytes.data(), bytes.size() - fastgltf::getGltfBufferPadding(), bytes.size()));
 
     BENCHMARK("Parse NewSponza") {
-        return parser.loadGLTF(jsonData.get(), intelSponza, benchmarkOptions);
+        return parser.loadGltfJson(jsonData.get(), intelSponza, benchmarkOptions);
     };
 
 #ifdef HAS_TINYGLTF
@@ -157,7 +157,7 @@ TEST_CASE("Benchmark base64 decoding from glTF file", "[gltf-benchmark]") {
     REQUIRE(jsonData->fromByteView(bytes.data(), bytes.size() - fastgltf::getGltfBufferPadding(), bytes.size()));
 
     BENCHMARK("Parse 2CylinderEngine and decode base64") {
-        return parser.loadGLTF(jsonData.get(), cylinderEngine, benchmarkOptions);
+        return parser.loadGltfJson(jsonData.get(), cylinderEngine, benchmarkOptions);
     };
 
 #ifdef HAS_TINYGLTF
@@ -211,7 +211,7 @@ TEST_CASE("Benchmark raw JSON parsing", "[gltf-benchmark]") {
     REQUIRE(jsonData->fromByteView(bytes.data(), bytes.size() - fastgltf::getGltfBufferPadding(), bytes.size()));
 
     BENCHMARK("Parse Buggy.gltf") {
-        return parser.loadGLTF(jsonData.get(), buggyPath, benchmarkOptions);
+        return parser.loadGltfJson(jsonData.get(), buggyPath, benchmarkOptions);
     };
 
 #ifdef HAS_TINYGLTF
@@ -266,7 +266,7 @@ TEST_CASE("Benchmark massive gltf file", "[gltf-benchmark]") {
     REQUIRE(jsonData->fromByteView(bytes.data(), bytes.size() - fastgltf::getGltfBufferPadding(), bytes.size()));
 
     BENCHMARK("Parse Bistro") {
-		return parser.loadGLTF(jsonData.get(), bistroPath, benchmarkOptions);
+		return parser.loadGltfJson(jsonData.get(), bistroPath, benchmarkOptions);
     };
 
 #ifdef HAS_TINYGLTF
@@ -330,25 +330,29 @@ TEST_CASE("Compare parsing performance with minified documents", "[gltf-benchmar
 
     fastgltf::Parser parser;
     BENCHMARK("Parse Buggy.gltf with normal JSON") {
-        return parser.loadGLTF(jsonData.get(), buggyPath, benchmarkOptions);
+        return parser.loadGltfJson(jsonData.get(), buggyPath, benchmarkOptions);
     };
 
     BENCHMARK("Parse Buggy.gltf with minified JSON") {
-        return parser.loadGLTF(minifiedJsonData.get(), buggyPath, benchmarkOptions);
+        return parser.loadGltfJson(minifiedJsonData.get(), buggyPath, benchmarkOptions);
     };
 }
 
-#if defined(FASTGLTF_IS_X86)
 TEST_CASE("Small CRC32-C benchmark", "[gltf-benchmark]") {
     static constexpr std::string_view test = "abcdefghijklmnopqrstuvwxyz";
     BENCHMARK("Default 1-byte tabular algorithm") {
         return fastgltf::crc32c(reinterpret_cast<const std::uint8_t*>(test.data()), test.size());
     };
+#if defined(FASTGLTF_IS_X86)
     BENCHMARK("SSE4 hardware algorithm") {
-        return fastgltf::hwcrc32c(reinterpret_cast<const std::uint8_t*>(test.data()), test.size());
+        return fastgltf::sse_crc32c(reinterpret_cast<const std::uint8_t*>(test.data()), test.size());
     };
-}
+#elif defined(FASTGLTF_IS_A64)
+	BENCHMARK("ARMv8 hardware CRC32-C algorithm") {
+		return fastgltf::armv8_crc32c(reinterpret_cast<const std::uint8_t*>(test.data()), test.size());
+	};
 #endif
+}
 
 TEST_CASE("Compare base64 decoding performance", "[gltf-benchmark]") {
 	std::string base64Characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -357,7 +361,7 @@ TEST_CASE("Compare base64 decoding performance", "[gltf-benchmark]") {
 	// We'll generate a random base64 buffer
 	std::random_device device;
 	std::mt19937 gen(device());
-	std::uniform_int_distribution<> distribution(0, base64Characters.size() - 1);
+	std::uniform_int_distribution<std::size_t> distribution(0, base64Characters.size() - 1);
 	std::string generatedData;
 	generatedData.reserve(bufferSize);
 	for (std::size_t i = 0; i < bufferSize; ++i) {
@@ -414,7 +418,7 @@ TEST_CASE("Compare base64 decoding performance", "[gltf-benchmark]") {
 	}
 #elif defined(FASTGLTF_IS_A64)
 	const auto& impls = simdjson::get_available_implementations();
-	if (const auto* neon = impls["arm64"]; avx2 != nullptr && neon->supported_by_runtime_system()) {
+	if (const auto* neon = impls["arm64"]; neon != nullptr && neon->supported_by_runtime_system()) {
 		BENCHMARK("Run fastgltf's Neon base64 decoder") {
 			return fastgltf::base64::neon_decode(generatedData);
 		};

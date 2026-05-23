@@ -19,6 +19,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <random>
 #include <unordered_set>
 #include <thread>
@@ -143,7 +144,7 @@ void VulkanEngine::init_default_data()
     //    });
 
     // testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
-    testMeshes = loadGltfMeshes(this, "..\\..\\assets\\Suzanne.glb").value();
+    testMeshes = loadGltfMeshes(this, "../../assets/Suzanne.glb").value();
 
     // 3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
@@ -254,7 +255,7 @@ void VulkanEngine::init_default_data()
     }
 
     // Ground mesh — single-instance static geometry, uses ground.vert (no instance transform buffer).
-    auto groundMeshes = loadGltfMeshes(this, "..\\..\\assets\\Ground.glb");
+    auto groundMeshes = loadGltfMeshes(this, "../../assets/Ground.glb");
     if (groundMeshes.has_value() && !groundMeshes->empty())
     {
         // Reuse testMeshes for buffer ownership so the existing cleanup loop
@@ -1206,7 +1207,13 @@ void VulkanEngine::init_imgui()
     // this initializes the core structures of imgui
     ImGui::CreateContext();
 
-    ImGui::GetIO().Fonts->AddFontFromFileTTF("C:/Windows/Fonts/segoeui.ttf", 18.0f);
+    {
+        const char* fontPath = "C:/Windows/Fonts/segoeui.ttf";
+        if (std::filesystem::exists(fontPath))
+        {
+            ImGui::GetIO().Fonts->AddFontFromFileTTF(fontPath, 18.0f);
+        }
+    }
 
     // this initializes imgui for SDL
     ImGui_ImplSDL3_InitForVulkan(_window);

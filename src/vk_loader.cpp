@@ -9,7 +9,7 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include <fastgltf/glm_element_traits.hpp>
-#include <fastgltf/parser.hpp>
+#include <fastgltf/core.hpp>
 #include <fastgltf/tools.hpp>
 
 
@@ -109,7 +109,7 @@ std::optional<std::vector<std::shared_ptr<MeshAsset>>> loadGltfMeshes(VulkanEngi
     fastgltf::Asset gltf;
     fastgltf::Parser parser{};
 
-    auto load = parser.loadBinaryGLTF(&data, filePath.parent_path(), gltfOptions);
+    auto load = parser.loadGltfBinary(&data, filePath.parent_path(), gltfOptions);
     if (load) {
         gltf = std::move(load.get());
     }
@@ -275,7 +275,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
 
     auto type = fastgltf::determineGltfFileType(&data);
     if (type == fastgltf::GltfType::glTF) {
-        auto load = parser.loadGLTF(&data, path.parent_path(), gltfOptions);
+        auto load = parser.loadGltfJson(&data, path.parent_path(), gltfOptions);
         if (load) {
             gltf = std::move(load.get());
         }
@@ -285,7 +285,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         }
     }
     else if (type == fastgltf::GltfType::GLB) {
-        auto load = parser.loadBinaryGLTF(&data, path.parent_path(), gltfOptions);
+        auto load = parser.loadGltfBinary(&data, path.parent_path(), gltfOptions);
         if (load) {
             gltf = std::move(load.get());
         }
@@ -535,7 +535,7 @@ std::optional<std::shared_ptr<LoadedGLTF>> loadGltf(VulkanEngine* engine, std::s
         std::visit(fastgltf::visitor{ [&](fastgltf::Node::TransformMatrix matrix) {
                                           memcpy(&newNode->localTransform, matrix.data(), sizeof(matrix));
                                       },
-                       [&](fastgltf::Node::TRS transform) {
+                       [&](fastgltf::TRS transform) {
                            glm::vec3 tl(transform.translation[0], transform.translation[1],
                                transform.translation[2]);
                            glm::quat rot(transform.rotation[3], transform.rotation[0], transform.rotation[1],
