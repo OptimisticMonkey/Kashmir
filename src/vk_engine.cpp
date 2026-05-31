@@ -60,7 +60,7 @@ void VulkanEngine::init()
         SDL_free(joystick_ids);
     }
 
-    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN);
+    SDL_WindowFlags window_flags = (SDL_WindowFlags)(SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
 
     _window = SDL_CreateWindow("Vulkan Engine",
                                _windowExtent.width,
@@ -1013,8 +1013,15 @@ void VulkanEngine::init_swapchain()
 {
     create_swapchain(_windowExtent.width, _windowExtent.height);
 
-    // draw image size will match the window
-    VkExtent3D drawImageExtent = { _windowExtent.width, _windowExtent.height, 1 };
+    // The draw/depth images are allocated once at the primary display's resolution -- the largest
+    // the window can ever become. On resize we only rebuild the swapchain and re-clamp _drawExtent
+    // into this image, so the draw image is never recreated (keeps _drawImageDescriptors valid).
+    VkExtent3D drawImageExtent = { 3840, 2160, 1 };
+    if (const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay()))
+    {
+        drawImageExtent.width = (uint32_t)mode->w;
+        drawImageExtent.height = (uint32_t)mode->h;
+    }
 
     // hardcoding the draw format to 32 bit float
     _drawImage.imageFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -1339,6 +1346,22 @@ void VulkanEngine::destroy_swapchain()
     }
 }
 
+void VulkanEngine::resize_swapchain()
+{
+    vkDeviceWaitIdle(_device);
+
+    int w = 0, h = 0;
+    SDL_GetWindowSizeInPixels(_window, &w, &h); // pixels, not points (HiDPI-safe)
+    _windowExtent.width = (uint32_t)w;
+    _windowExtent.height = (uint32_t)h;
+
+    destroy_swapchain(); // also frees the per-image present semaphores
+    create_swapchain(_windowExtent.width, _windowExtent.height);
+    rebuild_present_semaphores(); // swapchain image count may have changed
+
+    resize_requested = false;
+}
+
 void VulkanEngine::draw()
 {
     update_scene();
@@ -1349,12 +1372,21 @@ void VulkanEngine::draw()
     get_current_frame()._deletionQueue.flush();
     get_current_frame()._frameDescriptors.clear_pools(_device);
 
-    VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
-
     // request image from the swapchain
     uint32_t swapchainImageIndex = 0;
-    VK_CHECK(vkAcquireNextImageKHR(
-        _device, _swapchain, 1000000000, get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex));
+    VkResult acquireResult = vkAcquireNextImageKHR(
+        _device, _swapchain, 1000000000, get_current_frame()._swapchainSemaphore, nullptr, &swapchainImageIndex);
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
+    {
+        // surface no longer matches the swapchain -- rebuild it next loop iteration.
+        // Bail before touching the fence so it stays signaled for the next frame.
+        resize_requested = true;
+        return;
+    }
+    VK_CHECK(acquireResult); // real errors still abort; VK_SUBOPTIMAL_KHR is tolerated here
+
+    // now that we have an image, reset the fence so the upcoming submit can signal it
+    VK_CHECK(vkResetFences(_device, 1, &get_current_frame()._renderFence));
 
     // naming it cmd for shorter writing
     VkCommandBuffer cmd = get_current_frame()._mainCommandBuffer;
@@ -1394,8 +1426,9 @@ void VulkanEngine::draw()
     ////finalize the command buffer (we can no longer add commands, but it can now be executed)
     // VK_CHECK(vkEndCommandBuffer(cmd));
 
-    _drawExtent.width = _drawImage.imageExtent.width;
-    _drawExtent.height = _drawImage.imageExtent.height;
+    // render into the sub-region of the (display-sized) draw image that matches the current window
+    _drawExtent.width = std::min(_windowExtent.width, _drawImage.imageExtent.width);
+    _drawExtent.height = std::min(_windowExtent.height, _drawImage.imageExtent.height);
 
     VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
 
@@ -1522,7 +1555,16 @@ void VulkanEngine::draw()
     presentInfo.pSwapchains = &_swapchain;
     presentInfo.pImageIndices = &swapchainImageIndex;
 
-    VK_CHECK(vkQueuePresentKHR(_graphicsQueue, &presentInfo));
+    VkResult presentResult = vkQueuePresentKHR(_graphicsQueue, &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR)
+    {
+        // surface size changed -- rebuild the swapchain on the next loop iteration
+        resize_requested = true;
+    }
+    else
+    {
+        VK_CHECK(presentResult);
+    }
 
     // increase the number of frames drawn
     _frameNumber++;
@@ -1553,8 +1595,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
     VkRenderingAttachmentInfo depthAttachment =
         vkinit::depth_attachment_info(_depthImage.imageView, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
-    VkRenderingInfo renderInfo = vkinit::rendering_info(_windowExtent, &colorAttachment, &depthAttachment);
-    // VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, nullptr);
+    VkRenderingInfo renderInfo = vkinit::rendering_info(_drawExtent, &colorAttachment, &depthAttachment);
     vkCmdBeginRendering(cmd, &renderInfo);
 
     // DRAW TRIANGLE
@@ -2472,8 +2513,14 @@ void VulkanEngine::run()
             ImGui_ImplSDL3_ProcessEvent(&e);
         }
 
-        // do not draw if we are minimized
-        if (stop_rendering)
+        // rebuild the swapchain if a resize was requested (window resized/maximized)
+        if (resize_requested)
+        {
+            resize_swapchain();
+        }
+
+        // do not draw if we are minimized or the window has no client area
+        if (stop_rendering || _windowExtent.width == 0 || _windowExtent.height == 0)
         {
             // throttle the speed to avoid the endless spinning
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -3052,7 +3099,7 @@ void VulkanEngine::update_scene()
 
     // camera projection
     glm::mat4 projection =
-        glm::perspective(glm::radians(70.f), (float)_windowExtent.width / (float)_windowExtent.height, 10000.f, 0.1f);
+        glm::perspective(glm::radians(70.f), (float)_drawExtent.width / (float)_drawExtent.height, 10000.f, 0.1f);
 
     // invert the Y direction on projection matrix so that we are more similar
     // to opengl and gltf axis
