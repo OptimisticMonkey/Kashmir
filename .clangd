@@ -1,1 +1,2 @@
-CompilationDatabase: build-clangd
+CompileFlags:
+  CompilationDatabase: build-clangd
