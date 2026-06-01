@@ -146,6 +146,32 @@ void VulkanEngine::init_default_data()
     // testMeshes = loadGltfMeshes(this, "..\\..\\assets\\basicmesh.glb").value();
     testMeshes = loadGltfMeshes(this, "../../assets/Suzanne.glb").value();
 
+    // Procedural editor-grid plane: a unit quad in the XZ plane centered at the
+    // origin (normal +Y). draw_geometry scales it up via the world matrix; the
+    // pristine-grid fragment shader derives lines from world XZ, so the quad's
+    // own UVs are unused. Drawn only when _showEditorGrid is on.
+    {
+        std::array<Vertex, 4> gridVerts{};
+        gridVerts[0].position = { -0.5f, 0.f, -0.5f };
+        gridVerts[1].position = { 0.5f, 0.f, -0.5f };
+        gridVerts[2].position = { 0.5f, 0.f, 0.5f };
+        gridVerts[3].position = { -0.5f, 0.f, 0.5f };
+        for (Vertex& v : gridVerts)
+        {
+            v.normal = { 0.f, 1.f, 0.f };
+            v.color = { 1.f, 1.f, 1.f, 1.f };
+        }
+        std::array<uint32_t, 6> gridIndices{ 0, 1, 2, 0, 2, 3 };
+        _gridMesh = uploadMesh(gridIndices, gridVerts);
+        _mainDeletionQueue.push_function(
+            [this]()
+            {
+                destroy_buffer(_gridMesh.indexBuffer);
+                destroy_buffer(_gridMesh.vertexBuffer);
+                destroy_buffer(_gridMesh.instanceTransformBuffer);
+            });
+    }
+
     // 3 default textures, white, grey, black. 1 pixel each
     uint32_t white = glm::packUnorm4x8(glm::vec4(1, 1, 1, 1));
     _whiteImage = create_image((void*)&white,
@@ -291,6 +317,7 @@ void VulkanEngine::init_pipelines()
     init_mesh_pipeline();
     metalRoughMaterial.build_pipelines(this);
     init_ground_pipeline();
+    init_grid_pipeline();
     init_tlas_instance_pipeline();
 }
 
@@ -331,6 +358,50 @@ void VulkanEngine::init_ground_pipeline()
         [=]()
         {
             vkDestroyPipeline(_device, _groundPipeline.pipeline, nullptr);
+            // layout is owned by metalRoughMaterial, don't destroy here
+        });
+}
+
+void VulkanEngine::init_grid_pipeline()
+{
+    VkShaderModule fragShader;
+    if (!vkutil::load_shader_module("../../shaders/grid.frag.spv", _device, &fragShader))
+    {
+        fmt::println("Error loading grid.frag.spv for grid pipeline");
+    }
+    VkShaderModule vertShader;
+    if (!vkutil::load_shader_module("../../shaders/grid.vert.spv", _device, &vertShader))
+    {
+        fmt::println("Error loading grid.vert.spv");
+    }
+
+    // Share layout with metalRoughMaterial — same descriptor sets, same push-constant range.
+    _gridPipeline.layout = metalRoughMaterial.opaquePipeline.layout;
+
+    PipelineBuilder pb;
+    pb.set_shaders(vertShader, fragShader);
+    pb.set_input_topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    pb.set_polygon_mode(VK_POLYGON_MODE_FILL);
+    pb.set_cull_mode(VK_CULL_MODE_NONE, VK_FRONT_FACE_CLOCKWISE);
+    pb.set_multisampling_none();
+    // Alpha-blend the grid lines over the already-shaded scene.
+    pb.enable_blending_alphablend();
+    // Depth-test against the scene (closer geometry occludes the grid) but don't
+    // write depth — the grid is a transparent overlay, not an occluder.
+    pb.enable_depthtest(false, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    pb.set_color_attachment_format(_drawImage.imageFormat);
+    pb.set_depth_format(_depthImage.imageFormat);
+    pb._pipelineLayout = _gridPipeline.layout;
+
+    _gridPipeline.pipeline = pb.build_pipeline(_device);
+
+    vkDestroyShaderModule(_device, fragShader, nullptr);
+    vkDestroyShaderModule(_device, vertShader, nullptr);
+
+    _mainDeletionQueue.push_function(
+        [=]()
+        {
+            vkDestroyPipeline(_device, _gridPipeline.pipeline, nullptr);
             // layout is owned by metalRoughMaterial, don't destroy here
         });
 }
@@ -1778,6 +1849,38 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd)
         }
     }
 
+    // Editor grid overlay: a large procedural quad on the world XZ plane at the
+    // origin, shaded with the pristine-grid fragment shader. Alpha-blended and
+    // depth-tested without depth write (see init_grid_pipeline), so it's
+    // occluded by closer geometry but never blocks it. Drawn last in the pass.
+    if (_showEditorGrid)
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gridPipeline.pipeline);
+        vkCmdBindDescriptorSets(
+            cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gridPipeline.layout, 0, 1, &globalDescriptor, 0, nullptr);
+        // Set 1 is the material set; the grid shaders don't sample it, but the
+        // shared layout still requires a valid descriptor set bound there.
+        vkCmdBindDescriptorSets(cmd,
+                                VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                _gridPipeline.layout,
+                                1,
+                                1,
+                                &_groundMaterial.materialSet,
+                                0,
+                                nullptr);
+
+        vkCmdBindIndexBuffer(cmd, _gridMesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+        GPUDrawPushConstants pushConstants{};
+        pushConstants.worldMatrix = glm::scale(glm::mat4{ 1.f }, glm::vec3(2000.f, 1.f, 2000.f));
+        pushConstants.vertexBuffer = _gridMesh.vertexBufferAddress;
+        pushConstants.instanceTransformBuffer = 0;
+        vkCmdPushConstants(
+            cmd, _gridPipeline.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(GPUDrawPushConstants), &pushConstants);
+
+        vkCmdDrawIndexed(cmd, _gridMesh.indexCount, 1, 0, 0, 0);
+    }
+
     vkCmdEndRendering(cmd);
 }
 
@@ -2569,6 +2672,7 @@ void VulkanEngine::run()
             ImGui::Checkbox("Debug cluster color", &_debugClusterColor);
             ImGui::Checkbox("Lit cluster color", &_debugClusterLit);
             ImGui::Checkbox("Raytraced shadows", &_useRaytracedShadows);
+            ImGui::Checkbox("Editor grid", &_showEditorGrid);
         }
         ImGui::End();
 
