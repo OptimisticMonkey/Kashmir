@@ -292,6 +292,10 @@ public:
 	// a TLAS via build_tlas(); the fragment shaders read sceneTLAS for occlusion.
 	bool _useRaytracedShadows{ false };
 
+	// Runtime toggle: when true, draw_geometry overlays the procedural editor
+	// grid (pristine-grid shader) on the world XZ plane at the origin.
+	bool _showEditorGrid{ false };
+
 	// Loaded from vkGetDeviceProcAddr in init_vulkan.
 	PFN_vkCreateAccelerationStructureKHR        pfnCreateAccelerationStructureKHR{ nullptr };
 	PFN_vkDestroyAccelerationStructureKHR       pfnDestroyAccelerationStructureKHR{ nullptr };
@@ -344,12 +348,15 @@ private:
 	void init_background_pipelines();
 	void init_update_transform_pipeline();
 	void init_ground_pipeline();
+	void init_grid_pipeline();
 	void init_shadow_resources();
 	void init_shadow_pipeline();
 	VkPipeline _updateTransformPipeline;
 	VkPipelineLayout _updateTransformPipelineLayout;
 	MaterialPipeline _groundPipeline;   // layout shared with metalRoughMaterial
 	MaterialInstance _groundMaterial;
+	MaterialPipeline _gridPipeline;     // editor grid; layout shared with metalRoughMaterial
+	GPUMeshBuffers _gridMesh;           // procedural XZ quad for the editor grid
 	void init_imgui();
 	VkPipelineLayout _trianglePipelineLayout;
 	VkPipeline _trianglePipeline;
