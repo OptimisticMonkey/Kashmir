@@ -2,7 +2,7 @@
 # project specific logic here.
 #
 cmake_minimum_required (VERSION 3.8)
-set(CMAKE__EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 project (Kashmir VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
