@@ -1,5 +1,46 @@
+// Editor grid overlay. Combines:
+//   vertexMain   -> grid.vert.spv
+//   fragmentMain -> grid.frag.spv
+
 import common;
 
+// Shared interpolants — written by vertexMain, read by fragmentMain.
+struct Varyings
+{
+    float4 sv_position : SV_Position;
+    float3 worldPos    : TEXCOORD0;
+};
+
+// ===========================================================================
+// Vertex stage  ->  grid.vert.spv
+// ===========================================================================
+// Renders a single procedurally-uploaded quad (single instance, no per-instance
+// transform buffer) positioned/scaled entirely via renderMatrix. Only the scene
+// UBO (set 0) is consumed; the fragment stage derives the grid from world-space
+// XZ, so no material data is needed here. The push-constant range still allocates
+// room for the third pointer (shared layout) — we just don't read it.
+struct PushConstants
+{
+    float4x4 renderMatrix;
+    Vertex*  vertexBuffer;
+};
+[[vk::push_constant]] PushConstants pc;
+
+[shader("vertex")]
+Varyings vertexMain(uint vid : SV_VertexID)
+{
+    Vertex v = pc.vertexBuffer[vid];
+    float4 worldPos = mul(pc.renderMatrix, float4(v.position, 1.0));
+
+    Varyings o;
+    o.sv_position = mul(sceneData.viewproj, worldPos);
+    o.worldPos    = worldPos.xyz;
+    return o;
+}
+
+// ===========================================================================
+// Fragment stage  ->  grid.frag.spv
+// ===========================================================================
 // "Pristine grid" — from Ben Golus, "The Best Darn Grid Shader (Yet)".
 // Uses screen-space derivatives to draw anti-aliased grid lines that stay crisp
 // at any distance/angle and fade gracefully toward a solid tint once cells
@@ -24,13 +65,8 @@ float pristineGrid(float2 uv, float2 lineWidth)
     return lerp(grid2.x, 1.0, grid2.y);
 }
 
-struct FSIn
-{
-    float3 worldPos : TEXCOORD0;
-};
-
 [shader("fragment")]
-float4 main(FSIn i) : SV_Target
+float4 fragmentMain(Varyings i) : SV_Target
 {
     // Grid is laid out on the world XZ plane. Spacing/width/color are fixed
     // constants — tweak here to restyle the editor grid.

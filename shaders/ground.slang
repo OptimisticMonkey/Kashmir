@@ -1,5 +1,53 @@
+// Ground plane material. Combines:
+//   vertexMain   -> ground.vert.spv
+//   fragmentMain -> ground.frag.spv
+
 import common;
 
+// Shared interpolants — written by vertexMain, read by fragmentMain.
+struct Varyings
+{
+    float4 sv_position : SV_Position;
+    float3 normal      : NORMAL;
+    float3 color       : COLOR;
+    float2 uv          : TEXCOORD0;
+    float3 worldPos    : TEXCOORD1;
+    float4 shadowCoord : TEXCOORD2;
+};
+
+// ===========================================================================
+// Vertex stage  ->  ground.vert.spv
+// ===========================================================================
+// Ground draws don't use the per-instance transform buffer — they're single-
+// instance with the world transform passed entirely in renderMatrix. The
+// pipeline layout's push-constant range still allocates space for the third
+// pointer; we just don't read it.
+struct PushConstants
+{
+    float4x4 renderMatrix;
+    Vertex*  vertexBuffer;
+};
+[[vk::push_constant]] PushConstants pc;
+
+[shader("vertex")]
+Varyings vertexMain(uint vid : SV_VertexID)
+{
+    Vertex v = pc.vertexBuffer[vid];
+    float4 worldPos = mul(pc.renderMatrix, float4(v.position, 1.0));
+
+    Varyings o;
+    o.sv_position = mul(sceneData.viewproj, worldPos);
+    o.normal      = normalize(mul((float3x3)pc.renderMatrix, v.normal));
+    o.color       = v.color.xyz * materialData.colorFactors.xyz;
+    o.uv          = float2(v.uv_x, v.uv_y);
+    o.worldPos    = worldPos.xyz;
+    o.shadowCoord = mul(sceneData.lightViewProj, worldPos);
+    return o;
+}
+
+// ===========================================================================
+// Fragment stage  ->  ground.frag.spv
+// ===========================================================================
 static const float PI = 3.14159265359;
 
 float D_GGX(float NoH, float roughness)
@@ -27,17 +75,8 @@ float3 F_Schlick(float cosTheta, float3 F0)
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
 
-struct FSIn
-{
-    float3 normal      : NORMAL;
-    float3 color       : COLOR;
-    float2 uv          : TEXCOORD0;
-    float3 worldPos    : TEXCOORD1;
-    float4 shadowCoord : TEXCOORD2;
-};
-
 [shader("fragment")]
-float4 main(FSIn i) : SV_Target
+float4 fragmentMain(Varyings i) : SV_Target
 {
     // Ground.glb has zero vertex colors, so we ignore i.color here and rely on
     // the material's colorFactors * base color texture for albedo.
